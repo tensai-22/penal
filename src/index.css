@@ -1,0 +1,23 @@
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+code {
+  font-family: source-code-pro, Menlo, Monaco, Consolas, 'Courier New',
+    monospace;
+}
+
+/* Agrega esto al final de tu App.css o index.css */
+
+/* El resto lo dejas igual, solo reconfirmas la clase .duplicate-text */
+.duplicate-text {
+    background-color: purple !important;
+    color: white !important;
+    padding: 2px 4px;
+    border-radius: 4px;
+}

@@ -1,0 +1,52 @@
+﻿/* Consulta.css */
+
+.consulta-container {
+    padding: 20px;
+    font-family: Arial, sans-serif;
+}
+
+    .consulta-container h2 {
+        margin-bottom: 20px;
+        text-align: center;
+    }
+
+.table-responsive {
+    overflow-x: auto;
+    margin-top: 20px;
+}
+
+.consulta-table {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+    .consulta-table thead {
+        background-color: #343a40;
+        color: #fff;
+    }
+
+    .consulta-table th,
+    .consulta-table td {
+        border: 1px solid #dee2e6;
+        padding: 8px;
+        text-align: left;
+    }
+
+    .consulta-table tbody tr:nth-child(even) {
+        background-color: #f8f9fa;
+    }
+
+    .consulta-table tbody tr:hover {
+        background-color: #e9ecef;
+    }
+
+.error {
+    color: red;
+    font-weight: bold;
+    margin-top: 10px;
+    text-align: center;
+}
+
+.text-center {
+    text-align: center;
+}
