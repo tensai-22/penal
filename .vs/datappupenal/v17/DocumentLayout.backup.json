@@ -1,0 +1,71 @@
+{
+  "Version": 1,
+  "WorkspaceRootPath": "C:\\Users\\jdavila.RENIECPERU\\Desktop\\Mesa de partes PPU_estiuacional\\PRISM\\datappupenal\\",
+  "Documents": [
+    {
+      "AbsoluteMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|C:\\Users\\jdavila.RENIECPERU\\Desktop\\Mesa de partes PPU_estiuacional\\PRISM\\datappupenal\\app.py||{8B382828-6202-11D1-8870-0000F87579D2}",
+      "RelativeMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|solutionrelative:app.py||{8B382828-6202-11D1-8870-0000F87579D2}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|C:\\Users\\jdavila.RENIECPERU\\Desktop\\Mesa de partes PPU_estiuacional\\PRISM\\datappupenal\\src\\components\\Vencidos.jsx||{14D17961-FE51-464D-9111-C4AF11D7D99A}",
+      "RelativeMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|solutionrelative:src\\components\\Vencidos.jsx||{14D17961-FE51-464D-9111-C4AF11D7D99A}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|C:\\Users\\jdavila.RENIECPERU\\Desktop\\Mesa de partes PPU_estiuacional\\PRISM\\datappupenal\\src\\components\\plazos_acciones.jsx||{14D17961-FE51-464D-9111-C4AF11D7D99A}",
+      "RelativeMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|solutionrelative:src\\components\\plazos_acciones.jsx||{14D17961-FE51-464D-9111-C4AF11D7D99A}"
+    }
+  ],
+  "DocumentGroupContainers": [
+    {
+      "Orientation": 0,
+      "VerticalTabListWidth": 256,
+      "DocumentGroups": [
+        {
+          "DockedWidth": 200,
+          "SelectedChildIndex": 2,
+          "Children": [
+            {
+              "$type": "Document",
+              "DocumentIndex": 1,
+              "Title": "Vencidos.jsx",
+              "DocumentMoniker": "C:\\Users\\jdavila.RENIECPERU\\Desktop\\Mesa de partes PPU_estiuacional\\PRISM\\datappupenal\\src\\components\\Vencidos.jsx",
+              "RelativeDocumentMoniker": "src\\components\\Vencidos.jsx",
+              "ToolTip": "C:\\Users\\jdavila.RENIECPERU\\Desktop\\Mesa de partes PPU_estiuacional\\PRISM\\datappupenal\\src\\components\\Vencidos.jsx",
+              "RelativeToolTip": "src\\components\\Vencidos.jsx",
+              "ViewState": "AgIAAHMBAAAAAAAAAAAjwIcBAAA3AAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.003663|",
+              "WhenOpened": "2025-07-25T21:49:03.09Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 2,
+              "Title": "plazos_acciones.jsx",
+              "DocumentMoniker": "C:\\Users\\jdavila.RENIECPERU\\Desktop\\Mesa de partes PPU_estiuacional\\PRISM\\datappupenal\\src\\components\\plazos_acciones.jsx",
+              "RelativeDocumentMoniker": "src\\components\\plazos_acciones.jsx",
+              "ToolTip": "C:\\Users\\jdavila.RENIECPERU\\Desktop\\Mesa de partes PPU_estiuacional\\PRISM\\datappupenal\\src\\components\\plazos_acciones.jsx",
+              "RelativeToolTip": "src\\components\\plazos_acciones.jsx",
+              "ViewState": "AgIAADICAAAAAAAAAAAowFECAAAbAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.003663|",
+              "WhenOpened": "2025-07-25T21:08:25.439Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 0,
+              "Title": "app.py",
+              "DocumentMoniker": "C:\\Users\\jdavila.RENIECPERU\\Desktop\\Mesa de partes PPU_estiuacional\\PRISM\\datappupenal\\app.py",
+              "RelativeDocumentMoniker": "app.py",
+              "ToolTip": "C:\\Users\\jdavila.RENIECPERU\\Desktop\\Mesa de partes PPU_estiuacional\\PRISM\\datappupenal\\app.py",
+              "RelativeToolTip": "app.py",
+              "ViewState": "AgIAALQVAAAAAAAAAAAUwMAVAAAAAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.002457|",
+              "WhenOpened": "2024-11-13T19:01:07.672Z",
+              "EditorCaption": ""
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,48 @@
+﻿/* archivo: tabla_minima.ccss */
+
+.dropzone {
+    border: 2px dashed #aaa;
+    padding: 20px;
+    text-align: center;
+    cursor: pointer;
+    min-height: 120px;
+    margin-bottom: 20px;
+}
+
+/* Estilo base para las celdas de la tabla */
+.tabla-minima-cell {
+    padding: 8px;
+    vertical-align: middle;
+    border: 1px solid #ddd;
+    min-width: 25px;
+    max-width: 3000px;
+    overflow: hidden;
+}
+
+/* Encabezado de la tabla */
+.tabla-minima-header {
+    background-color: #f5f5f5;
+    font-weight: bold;
+    text-align: center;
+    border: 1px solid #ddd;
+}
+
+/* Celda seleccionada */
+.selected-cell {
+    border: 2px solid #000;
+}
+
+/* Celda en modo edición (puede ajustarse si se requiere) */
+.editing-cell {
+    /* Opcional: puede definirse un estilo distinto durante la edición */
+}
+
+/* Celda editada: fondo verde para indicar cambio */
+.edited-cell {
+    background-color: green !important;
+}
+
+/* Ajuste específico para la columna e_situacional */
+.e-situacional {
+    width: 300px;
+}
