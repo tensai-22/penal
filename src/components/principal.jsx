@@ -1,1613 +1,1681 @@
-﻿import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import BulkUpdateButton from './BOX-PLAZOS/BulkUpdateButton';
-
-import { useDropzone } from 'react-dropzone';
-import debounce from 'lodash.debounce';
-import { parse, format } from 'date-fns';
-import { es } from 'date-fns/locale';
-import { Popper } from '@mui/material';
-import LawyerFilter from './LawyerFilter';
+﻿import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-    Box, Button, Typography, Modal, TextField, Grid, Paper,
-    TableContainer, Table, TableHead, TableRow, TableCell, TableBody,
-    FormControl, InputLabel, Select, MenuItem, FormControlLabel,
-    Checkbox, Autocomplete, Dialog,
+    Box,
+    Button,
+    Checkbox,
+    Chip,
+    CircularProgress,
+    FormControl,
+    FormControlLabel,
+    InputLabel,
+    MenuItem,
+    Select,
+    TextField,
+    Typography,
+    Dialog,
     DialogTitle,
     DialogContent,
-    DialogActions
-} from '@mui/material';
+    DialogActions,
+    Table,
+    TableHead,
+    TableRow,
+    TableCell,
+    TableBody,
+    TableContainer,
+    Paper,
+    LinearProgress,
+    Tooltip,
+} from "@mui/material";
+import { DataGrid } from "@mui/x-data-grid";
+import { esES } from "@mui/x-data-grid/locales";
+import axios from "axios";
+import debounce from "lodash.debounce";
+import { format, subMonths, parseISO, isValid as isValidDate } from "date-fns";
+import { es } from "date-fns/locale";
 
-import {
-    DataGrid,
-    GridToolbarContainer,
-    GridToolbarColumnsButton,
-    GridToolbarFilterButton,
-    GridToolbarDensitySelector,
-    GridToolbarExport,
-    GridToolbarQuickFilter   // opcional (requiere @mui/x-data-grid v5.17+)
-} from '@mui/x-data-grid';
-import { exportarExcelCustom } from './utils/exportarExcelCustom';
+// Icons
+import HistoryRoundedIcon from "@mui/icons-material/HistoryRounded";
+import PictureAsPdfRoundedIcon from "@mui/icons-material/PictureAsPdfRounded";
 
-import { FixedSizeList } from 'react-window';
-import axios, { CancelToken } from 'axios';
-import BusquedaRapida from './principal/common-principal/busqueda-rapida';
+import LawyerFilter from "./LawyerFilter";
+import BusquedaRapida from "./principal/common-principal/busqueda-rapida";
+import Ingresos from "./principal/common-principal/ingresos";
+import ExportExcelButton from "./common-general/export-excel";
 
-import { esES } from '@mui/x-data-grid/locales';
-import DownloadIcon from '@mui/icons-material/Download';
-import Ingresos from './principal/common-principal/ingresos';
+const PENAL = {
+    headerBg: "linear-gradient(180deg, #6B0F1A 0%, #3A0B12 55%, #22070C 100%)",
+    headerEdge: "rgba(255,255,255,0.14)",
+    outline: "#D1D5DB",
+    textOnHdr: "#F9FAFB",
 
-// Constante de estilo para modales
-const modalStyle = {
-    position: 'absolute',
-    top: '50%',
-    left: '50%',
-    transform: 'translate(-50%, -50%)',
-    width: 500,
-    backgroundColor: '#fff',
-    border: '2px solid #000',
-    boxShadow: 24,
-    padding: '20px',
-    display: 'flex',
-    flexDirection: 'column',
-    gap: '16px'
+    controlBg: "rgba(255,255,255,0.10)",
+    controlBgH: "rgba(255,255,255,0.16)",
+    controlBorder: "rgba(255,255,255,0.38)",
+    controlBorderH: "rgba(255,255,255,0.72)",
+    controlLabel: "rgba(249,250,251,0.92)",
+    controlPlaceholder: "rgba(249,250,251,0.80)",
+
+    red: "#B91C1C",
+    redH: "#991B1B",
+    redA: "#7F1D1D",
+
+    excel: "#1D6F42",
+    excelH: "#155A34",
+    excelA: "#0F4528",
+
+    success: "#16A34A",
+    successH: "#15803D",
+
+    keyHeaderBg: "linear-gradient(180deg, #6B0F1A 0%, #3A0B12 55%, #22070C 100%)",
+    keyHeaderBorder: "rgba(255,255,255,0.18)",
+    keyHeaderText: "#F9FAFB",
+    keyCellBgEven: "rgba(107, 15, 26, 0.055)",
+    keyCellBgOdd: "rgba(107, 15, 26, 0.038)",
+    keyCellText: "#111827",
+
+    archivedRowBg: "#5B0A11",
+    archivedRowBgHover: "#4A080E",
+    archivedRowText: "#FFF1F2",
+    archivedRowSubtle: "rgba(255,255,255,0.86)",
+
+    rowEvenBg: "rgba(107, 15, 26, 0.020)",
+    rowOddBg: "rgba(107, 15, 26, 0.035)",
+    rowHoverBg: "rgba(107, 15, 26, 0.060)",
+
+    gridCellBorder: "rgba(107, 15, 26, 0.18)",
+    gridCellBorderStrong: "rgba(107, 15, 26, 0.26)",
 };
 
+const getRangoAnual = () => {
+    const now = new Date();
+    const from = format(new Date(now.getFullYear(), 0, 1), "yyyy-MM-dd");
+    const to = format(now, "yyyy-MM-dd");
+    return { from, to };
+};
 
+const safeMirrorFrom = (toStr) => {
+    if (!toStr) return "";
+    const d = parseISO(toStr);
+    if (!isValidDate(d)) return "";
+    return format(subMonths(d, 1), "yyyy-MM-dd");
+};
 
 const Principal = ({ isLoggedIn, role, username }) => {
-
-
-
-    const [tab, setTab] = useState(0);
-
-    // Estados para modo búsqueda y filtros
-    const [searchMode, setSearchMode] = useState(false);
-    const [queryNotificacion, setQueryNotificacion] = useState('');
-    const [searchField, setSearchField] = useState('legajo');
-    const [query, setQuery] = useState('');
-
-    // Estados para modales y rangos
-    const [openRangoModal, setOpenRangoModal] = useState(false);
-
-    const [openModal, setOpenModal] = useState(false);
-
-    // Estados para datos y paginación (tabla principal)
-    // Estados para datos y paginación (tabla principal)
-    const [totalRecords, setTotalRecords] = useState(0);
-    const [totalPages, setTotalPages] = useState(1);
-
-    // — Se agrega estado para los datos que llegan del API —
-    const [datos, setDatos] = useState([]);     // <-- Añadido para almacenar resultados
-
-    // Si luego sigues usando setPage(…) en tu código, también necesitas:
-    const [page, setPage] = useState(1);        // <-- Añadido para controlar la página actual
-
-    // *** NUEVOS ESTADOS PARA FILTROS ***
-    const [filtroYear, setFiltroYear] = useState("");
-    const [availableYears, setAvailableYears] = useState([]); // ← AÑADIDO
-    const [filtroTipo, setFiltroTipo] = useState("ALL");
-
-
     const API_BASE_URL = `${window.location.protocol}//${window.location.hostname}:5001`;
+    const FIXED_PAGE_SIZE = 100;
 
+    const [tab] = useState(0);
 
+    const [query, setQuery] = useState("");
+    const [queryApplied, setQueryApplied] = useState("");
 
-
-
-
-    const handleAgregarCaso = async () => {
-        await agregarCaso();          // reutiliza la lógica ya implementada
-    };
-
-
-
-
-
-    // Variables y funciones para elementos adicionales
+    const [filtroTipo, setFiltroTipo] = useState("ALL");
     const [selectedAbogado, setSelectedAbogado] = useState("");
-    // Estado para el modal de historial mínimo
-    const [openHistorialMinimal, setOpenHistorialMinimal] = useState(false);
-    // Estado para datos del historial mínimo
-    const [historialData, setHistorialData] = useState([]);
 
-    const [mostrarArchivados, setMostrarArchivados] = useState(false);
-    // Función para resaltar coincidencias en la búsqueda
-    const highlightMatch = (text, query) => {
-        if (!text || !query) return text;
-        const regex = new RegExp(`(${query})`, 'gi');
-        return text.split(regex).map((part, index) =>
-            part.toLowerCase() === query.toLowerCase() ? (
-                <span key={index} style={{ backgroundColor: '#FFFF00' }}>{part}</span>
-            ) : (
-                part
-            )
-        );
-    };
+    const [mostrarArchivados, setMostrarArchivados] = useState(true);
 
+    const initialRangeRef = useRef(getRangoAnual());
+    const initialMirror = safeMirrorFrom(initialRangeRef.current.to);
+    const initialManualOverride = initialMirror ? initialRangeRef.current.from !== initialMirror : true;
 
+    const [fromApplied, setFromApplied] = useState(initialRangeRef.current.from);
+    const [toApplied, setToApplied] = useState(initialRangeRef.current.to);
+    const [fromUI, setFromUI] = useState(initialRangeRef.current.from);
+    const [toUI, setToUI] = useState(initialRangeRef.current.to);
+    const [dateError, setDateError] = useState("");
 
-    const modalFieldLabels = {
-        abogado: "Abogado",
-        delito: "Delito",
-        denunciado: "Denunciado",
-        departamento: "Departamento",
-        e_situacional: "Situación",
-        etiqueta: "Etiqueta",
-        fecha_de_archivo: "Fecha de Archivo",
-        fecha_e_situacional: "Fecha de Estado",
-        fecha_ingreso: "Fecha de Ingreso",
-        fiscalia: "Fiscalía",
-        informe_juridico: "Informe Jurídico",
-        item: "Ítem",
-        juzgado: "Juzgado",
-        last_modified: "Última Modificación",
-        "nr de exp completo": "Número de Expediente Completo",
-        origen: "Origen",
-        registro_ppu: "Registro PPU",
-        source: "Fuente"
-    };
+    const [fromManualOverride, setFromManualOverride] = useState(initialManualOverride);
 
-    const formatModalDate = (dateStr) => {
-        if (!dateStr) return "";
-        const dateObj = new Date(dateStr);
-        if (isNaN(dateObj.getTime())) {
-            return dateStr;
-        }
-        return format(dateObj, "dd 'de' MMMM yyyy, HH:mm:ss", { locale: es });
-    };
-
-    // Estados para modal de impulso
-    const [busquedaQuery, setBusquedaQuery] = useState('');
-    const [busquedaTipo, setBusquedaTipo] = useState('casoJudicial');
-    const [impulsoResults, setImpulsoResults] = useState([]);
-    const [impulsoTempSeleccionado, setImpulsoTempSeleccionado] = useState(null);
-    const [openImpulsoConfirmModal, setOpenImpulsoConfirmModal] = useState(false);
-    const [openImpulsoUploadModal, setOpenImpulsoUploadModal] = useState(false);
-
-
-
-
-    const debouncedImpulsoSearch = useMemo(
-        () => debounce(async q => {
-            if (!q.trim()) {
-                setImpulsoResults([]);
-                return;
-            }
-            try {
-                const { data } = await axios.get(`${API_BASE_URL}/api/new_search`, {
-                    params: { query: q, search_field: busquedaTipo }
-                });
-                setImpulsoResults(data);
-            } catch {
-                setImpulsoResults([]);
-            }
-        }, 500),
-        [busquedaTipo]
-    );
-
-    const downloadPDF = async row => {
-        const resp = await axios.get(
-            `${API_BASE_URL}/api/descargar_pdf?ruta=${encodeURIComponent(row.ruta)}`,
-            { responseType: 'blob' }
-        );
-        const blob = new Blob([resp.data], { type: 'application/pdf' });
-        const url = window.URL.createObjectURL(blob);
-        const fecha = format(new Date(row.fecha_atencion), 'dd-MM-yyyy', { locale: es });
-        const name = `${row.abogado}_${row.registro_ppu}_${row.origen}_${fecha}.pdf`;
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = name;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        window.URL.revokeObjectURL(url);
-    };
-
-    const handleImpulsoRowClick = row => {
-        setImpulsoTempSeleccionado(row);
-        setOpenImpulsoConfirmModal(true);
-    };
-
-    const handleConfirmImpulso = async () => {
-        setOpenImpulsoConfirmModal(false);
-        setOpenImpulsoModal(false);
-
-        console.log('→ payload registro_ppu:', impulsoTempSeleccionado.registro_ppu);
-
-        try {
-            const response = await axios.post(
-                `${API_BASE_URL}/api/historiales`,
-                { registro_ppu: [impulsoTempSeleccionado.registro_ppu] }
-            );
-
-            // 1. Inspeccionar la estructura completa
-            console.log('← response.data:', response.data);
-            console.log('← response.data.historiales:', response.data.historiales);
-            console.log('← Claves en historiales:', Object.keys(response.data.historiales));
-
-            // 2. Extraer solo el array que corresponde al PPU
-            const registrosPorPPU = response.data.historiales[
-                impulsoTempSeleccionado.registro_ppu
-            ] || [];
-
-            console.log('→ registrosPorPPU:', registrosPorPPU);
-
-            // 3. Actualizar estado y abrir modal
-            setHistorialData(registrosPorPPU);
-            setSelectedRegistroPPU(impulsoTempSeleccionado.registro_ppu);
-            setOpenHistorialMinimal(true);
-        } catch (error) {
-            console.error('Error en axios.post /api/historiales:', error.response ?? error);
-            alert("Error al obtener historial");
-        }
-    };
-
-
-
-
-    const handleCancelImpulso = () => {
-        setImpulsoTempSeleccionado(null);
-        setOpenImpulsoConfirmModal(false);
-    };
-
-
-
-
-
-
-
-    // Función para ejecutar búsqueda condicional
-    const pdfWindowRef = useRef(null);
-    // Después:
-    const buscarDatos = useCallback(async (_paginaIgnorada, queryTerm) => {
-        if (cancelTokenSource) {
-            cancelTokenSource.cancel("Cancelando solicitud previa");
-        }
-        cancelTokenSource = CancelToken.source();
-
-        try {
-            console.log("Frontend:/api/buscar con params →", {
-                query: queryTerm,
-                abogado: procesarAbogado(selectedAbogado),
-                mostrar_archivados: mostrarArchivados,
-                year: filtroYear,
-                tipo: filtroTipo,
-            });
-
-            const response = await axios.get(`${API_BASE_URL}/api/buscar`, {
-                params: {
-                    limit: 1000000,
-                    query: queryTerm,
-                    abogado: procesarAbogado(selectedAbogado),
-                    mostrar_archivados: mostrarArchivados,
-                    year: filtroYear,
-                    tipo: filtroTipo,
-                },
-                cancelToken: cancelTokenSource.token,
-            });
-
-            console.log("Frontend:/api/buscar respondió →", response.data);
-            setDatos(response.data.data);
-            setTotalRecords(response.data.total_records);
-        } catch (error) {
-            if (axios.isCancel(error)) {
-                console.log("Solicitud cancelada:", error.message);
-            } else {
-                console.error("Error en /api/buscar:", error);
-            }
-        }
-    }, [API_BASE_URL, selectedAbogado, mostrarArchivados, filtroYear, filtroTipo]);
-
-
-
-
-
-    const debouncedBuscarDatos = useCallback(
-        debounce((pagina, queryTerm) => {
-            buscarDatos(pagina, queryTerm);
-        }, 500),
-        [buscarDatos]
-    );
-
+    const [datos, setDatos] = useState([]);
+    const [isLoading, setIsLoading] = useState(false);
 
     const [openBusquedaRapida, setOpenBusquedaRapida] = useState(false);
+    const [busquedaRapidaRegistroPPU, setBusquedaRapidaRegistroPPU] = useState("");
 
+    const [editingRowId, setEditingRowId] = useState(null);
+    const [editedData, setEditedData] = useState({});
 
-    // —————— A) useEffect para cargar “availableYears” ——————
-    useEffect(() => {
-        if (!isLoggedIn) return;
+    const [selectedRegistroPPU, setSelectedRegistroPPU] = useState("");
 
-        axios
-            .get(`${API_BASE_URL}/api/years`)
-            .then(respYears => {
-                // 1) Obtener arreglo crudo (por ejemplo: [2025, "2024", 2023, 0])
-                const raw = respYears.data.years || [];
+    // ✅ HISTORIAL SOLO DE SITUACIÓN
+    const [openHistorial, setOpenHistorial] = useState(false);
+    const [historyDetail, setHistoryDetail] = useState([]);
+    const [historyLoading, setHistoryLoading] = useState(false);
+    const [historyError, setHistoryError] = useState("");
 
-                // 2) Convertir todo a string y quedarnos solo con cadenas de 4 dígitos
-                const years = raw
-                    .map(y => String(y))
-                    .filter(y => /^\d{4}$/.test(y));  // acepta "2025", "2024", etc.
+    const cancelRef = useRef(null);
 
-                setAvailableYears(years);
+    const [paginationModel, setPaginationModel] = useState({
+        page: 0,
+        pageSize: FIXED_PAGE_SIZE,
+    });
 
-                // 3) Si aún no teníamos filtro, presetear al primero (el más alto)
-                if (!filtroYear && years.length > 0) {
-                    setFiltroYear(years[0]);
-                }
-            })
-            .catch(err => {
-                console.error("Error cargando availableYears:", err);
+    const handlePaginationModelChange = useCallback(
+        (model) => {
+            setPaginationModel({
+                page: model?.page ?? 0,
+                pageSize: FIXED_PAGE_SIZE,
             });
-    }, [isLoggedIn]);
+        },
+        [FIXED_PAGE_SIZE]
+    );
 
+    // 🔥 Pulso visible
+    const [gridPulse, setGridPulse] = useState(false);
+    const gridPulseTimerRef = useRef(null);
 
+    const pulseGrid = useCallback(() => {
+        if (gridPulseTimerRef.current) clearTimeout(gridPulseTimerRef.current);
+        setGridPulse(true);
+        gridPulseTimerRef.current = setTimeout(() => setGridPulse(false), 380);
+    }, []);
 
-
-
-
-
-    // —————— B) useEffect para averiguar “used_year” inicial ——————
     useEffect(() => {
-        if (!isLoggedIn) return;
+        return () => {
+            if (gridPulseTimerRef.current) clearTimeout(gridPulseTimerRef.current);
+        };
+    }, []);
 
-        const source = CancelToken.source();
-        axios
-            .get(`${API_BASE_URL}/api/buscar`, {
-                params: {
-                    page: 1,
-                    limit: 1,
-                    query: "",
-                    abogado: procesarAbogado(selectedAbogado),
-                    // No enviamos ni mostrar_archivados ni tipo aquí,
-                    // sólo queremos el used_year inicial
-                },
-                cancelToken: source.token,
-            })
-            .then(resp => {
-                const usedString = String(resp.data.used_year || "");
-                if (usedString && usedString !== "0") {
-                    setFiltroYear(usedString);
-                }
-            })
-            .catch(err => {
-                if (!axios.isCancel(err)) {
-                    console.error("Error obteniendo used_year:", err);
-                }
-            });
-
-        return () => source.cancel("Limpiando petición inicial de used_year");
-    }, [
-        isLoggedIn]);
-
-
-
-    // —————— C) useEffect que realmente dispara buscarDatos cuando filtroYear ya existe ——————
     useEffect(() => {
-        if (!isLoggedIn) return;
-        // Solo llamar a buscarDatos si filtroYear NO es cadena vacía
-        if (filtroYear === "") {
-            return;
+        axios.defaults.withCredentials = true;
+    }, []);
+
+    const procesarAbogado = useCallback((valor) => {
+        if (!valor) return "";
+        const s = String(valor);
+        if (s.includes(";")) return s.split(";").slice(-1)[0].trim();
+        return s.trim();
+    }, []);
+
+    const buildBuscarParams = useCallback(
+        (queryTerm, overrides = {}) => {
+            const abogadoFinal =
+                role === "admin"
+                    ? procesarAbogado(
+                        overrides.selectedAbogado !== undefined ? overrides.selectedAbogado : selectedAbogado
+                    )
+                    : procesarAbogado(username);
+
+            const q = String(queryTerm ?? "").trim();
+
+            const params = {
+                limit: 1000000,
+                query: q,
+                abogado: abogadoFinal,
+                mostrar_archivados:
+                    overrides.mostrarArchivados !== undefined ? overrides.mostrarArchivados : mostrarArchivados,
+                tipo: overrides.filtroTipo !== undefined ? overrides.filtroTipo : filtroTipo,
+            };
+
+            const f = overrides.fromApplied !== undefined ? overrides.fromApplied : fromApplied;
+            const t = overrides.toApplied !== undefined ? overrides.toApplied : toApplied;
+
+            if (q) {
+                params.from = "1900-01-01";
+                params.to = "2100-12-31";
+                return params;
+            }
+
+            if (f && t) {
+                params.from = f;
+                params.to = t;
+            }
+
+            return params;
+        },
+        [role, username, selectedAbogado, mostrarArchivados, filtroTipo, fromApplied, toApplied, procesarAbogado]
+    );
+
+    const BUSCAR_CACHE_TTL_MS = 5 * 60 * 1000;
+    const buscarCacheRef = useRef(
+        globalThis.__PPU_PENAL_BUSCAR_CACHE__ || (globalThis.__PPU_PENAL_BUSCAR_CACHE__ = new Map())
+    );
+
+    const buildCacheKey = useCallback((params) => {
+        const entries = Object.entries(params || {}).sort(([a], [b]) => a.localeCompare(b));
+        return entries.map(([k, v]) => `${k}=${encodeURIComponent(String(v ?? ""))}`).join("&");
+    }, []);
+
+    const putCache = useCallback((key, value) => {
+        const m = buscarCacheRef.current;
+        m.set(key, value);
+        if (m.size > 20) {
+            const firstKey = m.keys().next().value;
+            m.delete(firstKey);
         }
-        // Ahora filtroYear ya vale “2025” (o equivalente), así que buscamos datos
-        buscarDatos(1, query);
+    }, []);
+
+    const buscarDatos = useCallback(
+        async (_paginaIgnorada, queryTerm, overrides = {}) => {
+            if (!isLoggedIn) return;
+
+            if (cancelRef.current) {
+                cancelRef.current.cancel("Cancelando solicitud previa");
+            }
+
+            const params = buildBuscarParams(queryTerm, overrides);
+            const key = buildCacheKey(params);
+
+            const hit = buscarCacheRef.current.get(key);
+            const now = Date.now();
+
+            if (hit && now - hit.ts < BUSCAR_CACHE_TTL_MS) {
+                setDatos(hit.rows);
+                setIsLoading(false);
+                pulseGrid();
+                return;
+            }
+
+            const source = axios.CancelToken.source();
+            cancelRef.current = source;
+
+            setIsLoading(true);
+            pulseGrid();
+
+            try {
+                const resp = await axios.get(`${API_BASE_URL}/api/buscar`, {
+                    params,
+                    cancelToken: source.token,
+                });
+
+                const payload = resp.data || {};
+                const rows = Array.isArray(payload.data) ? payload.data : [];
+
+                setDatos(rows);
+                putCache(key, { ts: Date.now(), rows });
+
+                pulseGrid();
+            } catch (err) {
+                if (axios.isCancel(err)) return;
+                console.error("Error en /api/buscar:", err);
+            } finally {
+                setIsLoading(false);
+                cancelRef.current = null;
+            }
+        },
+        [API_BASE_URL, buildBuscarParams, buildCacheKey, putCache, isLoggedIn, pulseGrid]
+    );
+
+    const debouncedApplyQuery = useMemo(
+        () =>
+            debounce((v) => {
+                setQueryApplied(String(v ?? "").trim());
+            }, 450),
+        []
+    );
+
+    useEffect(() => {
+        return () => {
+            if (debouncedApplyQuery?.cancel) debouncedApplyQuery.cancel();
+        };
+    }, [debouncedApplyQuery]);
+
+    useEffect(() => {
+        if (!isLoggedIn) return;
+
+        buscarDatos(1, queryApplied);
+
+        return () => {
+            if (cancelRef.current) cancelRef.current.cancel("Unmount");
+        };
     }, [
         isLoggedIn,
         selectedAbogado,
         mostrarArchivados,
-        filtroYear,     // cuando cambie, y no sea "", ejecutamos buscarDatos
+        fromApplied,
+        toApplied,
         filtroTipo,
-        query,
-        buscarDatos
+        role,
+        username,
+        buscarDatos,
+        queryApplied,
     ]);
 
+    useEffect(() => {
+        setPaginationModel((p) => ({ ...p, page: 0, pageSize: FIXED_PAGE_SIZE }));
+    }, [fromApplied, toApplied, filtroTipo, queryApplied, selectedAbogado, mostrarArchivados, FIXED_PAGE_SIZE]);
 
-
-
-    // Función auxiliar para generar 'nr de exp completo'
-    const buildNrCompleto = (fiscaliaCode, casoCorto) => {
-        const partes = casoCorto.split('-').map(p => p.trim());
-        if (partes.length !== 2) return '';
-        const [num, year] = partes;
-        return `${fiscaliaCode}-${year}-${num}-0`;
-    };
-
-
-
-
-
-    // Manejo del cambio en el campo de búsqueda
     const handleQueryChange = (e) => {
-        const newQuery = e.target.value;
-        setQuery(newQuery);
-        setPage(1);
-        if (filtroYear !== "") {
-            debouncedBuscarDatos(1, newQuery);
-        }
-    };
+        const v = e.target.value;
+        setQuery(v);
 
-
-    const handleQueryNotificacionChange = (e) => {
-        const newQuery = e.target.value;
-        setQueryNotificacion(newQuery);
-        setPage(1); // Reinicia la página a 1, si es necesario
-        debouncedAdvancedData();
-    };
-
-
-    // Función para procesar búsqueda por rango
-    const handleBuscarPorRango = () => {
-        // Pasa todos los filtros actuales:
-        buscarDatosPorRango(
-            rangoPpuInicio,
-            rangoPpuFin,
-            selectedAbogado,   // <-- ¡Añadido!
-            mostrarArchivados, // <-- ¡Añadido!
-            query             // <-- ¡Añadido!
-        );
-    };
-
-
-    const buscarDatosPorRango = async (ppuInicio, ppuFin, abogado, mostrarArch, myQuery) => {
-        try {
-            setIsRangeSearchActive(true);
-            const response = await axios.get(`${API_BASE_URL}/api/buscar_rango`, {
-                params: {
-                    ppu_inicio: ppuInicio,
-                    ppu_fin: ppuFin,
-                    abogado: abogado,           // <-- ¡NUEVO!
-                    mostrar_archivados: mostrarArch, // <-- ¡NUEVO!
-                    query: myQuery,             // <-- ¡NUEVO!
-                },
-            });
-            setDatos(response.data.data);
-            setTotalRecords(response.data.data.length);
-            setPage(1);
-            setTotalPages(1);
-        } catch (error) {
-            console.error(error);
-            alert("Error en búsqueda por rango");
-        } finally {
-            setOpenRangoModal(false);
-        }
-    };
-
-
-    const [rangoPpuInicio, setRangoPpuInicio] = useState('');
-    const [rangoPpuFin, setRangoPpuFin] = useState('');
-    const [isRangeSearchActive, setIsRangeSearchActive] = useState(false);
-
-    const timeInputRef = useRef(null);
-    let cancelTokenSource; // Variable para manejar la cancelación de solicitudes.
-    const procesarAbogado = (valor) => {
-        if (!valor) return '';
-        const partes = valor.split(';');
-        return partes.length > 1 ? partes[1].trim() : valor.trim();
-    };
-
-    axios.defaults.withCredentials = true;
-    const [editingSeguimientoIndex, setEditingSeguimientoIndex] = useState(null);
-    const [editingSeguimientoValue, setEditingSeguimientoValue] = useState('');
-
-    const CustomPopper = (props) => {
-        return (
-            <Popper
-                {...props}
-                style={{ zIndex: 2000, marginTop: '5px', ...props.style }}
-                placement="bottom-start"
-            />
-        );
-    };
-
-
-    
-
-
-    const exportarExcel = async () => {
-        try {
-            // 1) Construir params base
-            const params = {
-                query,
-                abogado: selectedAbogado,
-                mostrar_archivados: mostrarArchivados,
-                year: filtroYear,
-                tipo: filtroTipo,
-            }
-
-            // 2) Incluir rango si aplica
-            if (isRangeSearchActive) {
-                params.ppu_inicio = rangoPpuInicio
-                params.ppu_fin = rangoPpuFin
-            }
-
-            // 3) Llamada al endpoint, esperando blob
-            const response = await axios.get(
-                `${API_BASE_URL}/api/exportar_excel`,
-                {
-                    params,
-                    responseType: 'blob',
-                    withCredentials: true,
-                }
-            )
-
-            // 4) Extraer filename de headers o construir fallback dinámico
-            const cd = response.headers['content-disposition'] || ''
-            let fileName = ''
-            const m = cd.match(/filename="?(.+?)"?($|;)/)
-            if (m) {
-                fileName = m[1]
-            } else {
-                // → Aquí viene el cambio clave:
-                const displayName = selectedAbogado
-                    ? selectedAbogado.toUpperCase()
-                    : (role === 'admin'
-                        ? 'GENERAL'
-                        : username.toUpperCase()
-                    )
-                const fecha = format(new Date(), "dd-MM-yyyy HH'h'mm'm'", { locale: es })
-                fileName = `Base de datos del año ${filtroYear || ''} - ${displayName} a la fecha de ${fecha}.xlsx`
-            }
-
-            // 5) Crear URL y forzar descarga
-            const blob = new Blob([response.data], {
-                type: response.headers['content-type'] || 'application/octet-stream'
-            })
-            const url = window.URL.createObjectURL(blob)
-            const link = document.createElement('a')
-            link.href = url
-            link.download = fileName
-            document.body.appendChild(link)
-            link.click()
-            link.remove()
-            window.URL.revokeObjectURL(url)
-
-        } catch (err) {
-            console.error("Error al exportar Excel:", err)
-            alert(`Error al exportar Excel: ${err.response?.data?.error || err.message}`)
-        }
-    }
-
-    const [headerPage, setHeaderPage] = useState(1);
-    const [editingRowId, setEditingRowId] = useState(null);
-    const [editedData, setEditedData] = useState({});
-    const getRowBackgroundColor = (dato) => "inherit";
-    const handleEditingRowChange = (field, value) => {
-        setEditingRowData(prevData => ({ ...prevData, [field]: value }));
-    };
-
-    const handleSaveClick = async () => {
-        console.log("handleSaveClick: editedData:", editedData);
-        if (!editedData || Object.keys(editedData).length === 0) {
-            console.error("handleSaveClick: editedData está vacío.");
-            alert("Error: Datos de edición no se han cargado.");
+        const trimmed = String(v ?? "").trim();
+        if (!trimmed) {
+            if (debouncedApplyQuery?.cancel) debouncedApplyQuery.cancel();
+            setQueryApplied("");
             return;
         }
-        if (!editedData.registro_ppu) {
-            console.error("handleSaveClick: Falta registro_ppu en editedData:", editedData);
+
+        debouncedApplyQuery(v);
+    };
+
+    const tryApplyRange = (nextFrom, nextTo) => {
+        const f = (nextFrom || "").trim();
+        const t = (nextTo || "").trim();
+
+        if (!f || !t) {
+            setDateError("Completa Desde y Hasta.");
+            return;
+        }
+
+        if (t < f) {
+            const fixedFrom = safeMirrorFrom(t) || t;
+            setFromUI(fixedFrom);
+            setFromApplied(fixedFrom);
+            setToApplied(t);
+            setDateError("");
+            pulseGrid();
+            return;
+        }
+
+        setDateError("");
+        setFromApplied(f);
+        setToApplied(t);
+        pulseGrid();
+    };
+
+    const handleFromChange = (e) => {
+        const v = e.target.value;
+        setFromUI(v);
+
+        const expected = safeMirrorFrom(toUI);
+        const isBackToMirror = expected && v === expected;
+        setFromManualOverride(!isBackToMirror);
+
+        let nextTo = toUI;
+
+        if (nextTo && v && nextTo < v) {
+            nextTo = v;
+            setToUI(v);
+        }
+
+        tryApplyRange(v, nextTo);
+    };
+
+    const handleToChange = (e) => {
+        const v = e.target.value;
+        setToUI(v);
+
+        const mirrored = safeMirrorFrom(v);
+        let nextFrom = fromUI;
+
+        if (!fromManualOverride) {
+            if (mirrored) {
+                nextFrom = mirrored;
+                setFromUI(mirrored);
+            }
+            tryApplyRange(nextFrom, v);
+            return;
+        }
+
+        if (nextFrom && v && v < nextFrom) {
+            nextFrom = mirrored || v;
+            setFromUI(nextFrom);
+            setFromManualOverride(false);
+        }
+
+        tryApplyRange(nextFrom, v);
+    };
+
+    const datosFiltrados = useMemo(() => {
+        let rows = Array.isArray(datos) ? datos : [];
+        const t = String(filtroTipo || "ALL").toUpperCase();
+
+        if (t === "DENUNCIA") {
+            rows = rows.filter((r) => String(r?.registro_ppu || "").toUpperCase().startsWith("D-"));
+        } else if (t === "LEGAJO") {
+            rows = rows.filter((r) => {
+                const p = String(r?.registro_ppu || "").toUpperCase().trim();
+                return p.startsWith("L") || p.startsWith("LEG-");
+            });
+        }
+
+        return rows.map((r) => ({
+            ...r,
+            id: r?.registro_ppu || `${Math.random()}`,
+        }));
+    }, [datos, filtroTipo]);
+
+    const totalVisible = datosFiltrados.length;
+
+    // ==========================
+    // ✅ HISTORIAL SOLO SITUACIÓN
+    // ==========================
+    const HISTORY_CACHE_TTL_MS = 10 * 60 * 1000;
+
+    const historyDetailCacheRef = useRef(
+        globalThis.__PPU_PENAL_SITUACION_HISTORY_CACHE__ ||
+        (globalThis.__PPU_PENAL_SITUACION_HISTORY_CACHE__ = new Map())
+    );
+    const historyBaseOkRef = useRef(null);
+
+    const historyRequest = useCallback(
+        async ({ method, path, params, data }) => {
+            const bases = historyBaseOkRef.current
+                ? [historyBaseOkRef.current]
+                : [`${API_BASE_URL}/api`, API_BASE_URL];
+
+            let lastErr = null;
+
+            for (const base of bases) {
+                const url = `${base}${path.startsWith("/") ? path : `/${path}`}`;
+                try {
+                    const resp =
+                        String(method || "GET").toUpperCase() === "POST"
+                            ? await axios.post(url, data ?? null, { params, withCredentials: true })
+                            : await axios.get(url, { params, withCredentials: true });
+
+                    historyBaseOkRef.current = base;
+                    return resp;
+                } catch (err) {
+                    lastErr = err;
+                    const st = err?.response?.status;
+                    if (st === 404 || st === 405) continue;
+                    throw err;
+                }
+            }
+
+            throw lastErr;
+        },
+        [API_BASE_URL]
+    );
+
+    const normalizeSituacionHistory = useCallback((arr) => {
+        const list = Array.isArray(arr) ? arr : [];
+        return list.map((it, idx) => ({
+            version_id: it?.version_id ?? it?.id ?? it?.pk ?? idx + 1,
+            fecha_version: it?.fecha_version ?? it?.fecha ?? it?.created_at ?? it?.ts ?? "",
+            usuario_modificacion:
+                it?.usuario_modificacion ?? it?.usuario ?? it?.user ?? it?.username ?? "",
+            old_value: it?.old_value ?? it?.valor_anterior ?? it?.valor ?? it?.value ?? "",
+            ruta: it?.ruta ?? it?.pdf_original ?? it?.pdf_path ?? it?.path ?? "",
+        }));
+    }, []);
+
+    const loadSituacionHistory = useCallback(
+        async (ppu) => {
+            const p = String(ppu || "").trim();
+            if (!p) return [];
+
+            const now = Date.now();
+            const hit = historyDetailCacheRef.current.get(p);
+            if (hit && now - hit.ts < HISTORY_CACHE_TTL_MS) {
+                return Array.isArray(hit.data) ? hit.data : [];
+            }
+
+            const candidates = ["e_situacional", "situacion_actual", "situacion", "SITUACION_ACTUAL"];
+            let lastErr = null;
+
+            for (const field of candidates) {
+                try {
+                    const resp = await historyRequest({
+                        method: "GET",
+                        path: "/busqueda_rapida_history",
+                        params: { ppu: p, field },
+                    });
+
+                    const raw =
+                        (Array.isArray(resp?.data?.data) && resp.data.data) ||
+                        (Array.isArray(resp?.data?.history) && resp.data.history) ||
+                        (Array.isArray(resp?.data?.items) && resp.data.items) ||
+                        [];
+
+                    const rows = normalizeSituacionHistory(raw);
+                    historyDetailCacheRef.current.set(p, { ts: now, data: rows });
+                    return rows;
+                } catch (err) {
+                    lastErr = err;
+                    const st = err?.response?.status;
+                    if (st === 400 || st === 404) continue;
+                    break;
+                }
+            }
+
+            throw lastErr;
+        },
+        [historyRequest, normalizeSituacionHistory]
+    );
+
+    const openPdfByRuta = useCallback(
+        (ruta) => {
+            const r = String(ruta || "").trim();
+            if (!r) return;
+            const base = historyBaseOkRef.current || `${API_BASE_URL}/api`;
+            const url = `${base}/open_pdf_by_ruta?ruta=${encodeURIComponent(r)}`;
+            window.open(url, "_blank", "noopener,noreferrer");
+        },
+        [API_BASE_URL]
+    );
+
+    const openHistoryForPPU = useCallback(
+        async (ppu) => {
+            const reg = String(ppu || "").trim();
+            if (!reg) return;
+
+            setSelectedRegistroPPU(reg);
+            setHistoryError("");
+            setHistoryDetail([]);
+            setOpenHistorial(true);
+            setHistoryLoading(true);
+
+            try {
+                const rows = await loadSituacionHistory(reg);
+                setHistoryDetail(Array.isArray(rows) ? rows : []);
+            } catch (err) {
+                console.error("Error historial situación:", err);
+                setHistoryError("No se pudo cargar el historial de SITUACIÓN.");
+                setHistoryDetail([]);
+            } finally {
+                setHistoryLoading(false);
+            }
+        },
+        [loadSituacionHistory]
+    );
+
+    const closeHistorial = useCallback(() => {
+        setOpenHistorial(false);
+        setHistoryError("");
+        setHistoryDetail([]);
+        setHistoryLoading(false);
+    }, []);
+
+    // ✅ Disponibilidad del botón HISTORIAL por fila (si existe al menos 1 PDF en historial)
+    const historyAvailRef = useRef(
+        globalThis.__PPU_PENAL_SITUACION_PDF_AVAIL__ ||
+        (globalThis.__PPU_PENAL_SITUACION_PDF_AVAIL__ = new Map())
+    );
+    const historyAvailInflightRef = useRef(new Set());
+    const [historyAvailTick, setHistoryAvailTick] = useState(0);
+    const bumpHistoryAvail = useCallback(() => setHistoryAvailTick((t) => t + 1), []);
+
+    const ensureHistoryPdfAvailability = useCallback(
+        async (ppu) => {
+            const p = String(ppu || "").trim();
+            if (!p) return;
+
+            const now = Date.now();
+            const prev = historyAvailRef.current.get(p);
+
+            if (prev && prev.state !== "unknown" && now - prev.ts < HISTORY_CACHE_TTL_MS) return;
+            if (prev?.state === "loading") return;
+
+            historyAvailRef.current.set(p, { state: "loading", ts: now });
+            bumpHistoryAvail();
+
+            try {
+                const rows = await loadSituacionHistory(p);
+                const hasPdf = (Array.isArray(rows) ? rows : []).some((x) => String(x?.ruta || "").trim());
+                historyAvailRef.current.set(p, { state: hasPdf ? "yes" : "no", ts: Date.now() });
+            } catch (e) {
+                historyAvailRef.current.set(p, { state: "no", ts: Date.now() });
+            } finally {
+                bumpHistoryAvail();
+            }
+        },
+        [HISTORY_CACHE_TTL_MS, loadSituacionHistory, bumpHistoryAvail]
+    );
+
+    // ==========================
+    // Export Excel
+    // ==========================
+    const exportarExcelGlobal = async () => {
+        try {
+            const params = buildBuscarParams(queryApplied, {});
+            const resp = await axios.get(`${API_BASE_URL}/api/exportar_excel`, {
+                params,
+                responseType: "blob",
+                withCredentials: true,
+            });
+
+            const cd = resp.headers["content-disposition"] || "";
+            let fileName = "";
+            const m = cd.match(/filename="?(.+?)"?($|;)/);
+
+            if (m) {
+                fileName = m[1];
+            } else {
+                const fecha = format(new Date(), "dd-MM-yyyy HH'h'mm'm'", { locale: es });
+                const rango = `${fromApplied}_a_${toApplied}`;
+                fileName = `Penal - Exportación global (${rango}) - ${fecha}.xlsx`;
+            }
+
+            const blob = new Blob([resp.data], {
+                type: resp.headers["content-type"] || "application/octet-stream",
+            });
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = fileName;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            window.URL.revokeObjectURL(url);
+        } catch (err) {
+            console.error("Error al exportar Excel:", err);
+            alert(`Error al exportar Excel: ${err.response?.data?.error || err.message}`);
+        }
+    };
+
+    const exportarSeleccionActual = () => {
+        const cols = fullColumns.filter((c) => c.field !== "acciones");
+        if (!datosFiltrados.length) {
+            alert("No hay registros para exportar.");
+            return;
+        }
+        void cols;
+    };
+
+    const onClickExport = () => {
+        if (role === "admin") exportarExcelGlobal();
+        else exportarSeleccionActual();
+    };
+
+    const handleEditClick = useCallback(
+        (row) => {
+            if (role === "admin") {
+                setEditedData({
+                    registro_ppu: row.registro_ppu,
+                    e_situacional: row.e_situacional,
+                    abogado: row.abogado,
+                    denunciado: row.denunciado,
+                    origen: row.origen,
+                    "nr de exp completo": row["nr de exp completo"],
+                    delito: row.delito,
+                    departamento: row.departamento,
+                    fiscalia: row.fiscalia,
+                    juzgado: row.juzgado,
+                    informe_juridico: row.informe_juridico,
+                    fecha_ingreso: row.fecha_ingreso,
+                    last_modified: row.last_modified,
+                    etiqueta: row.etiqueta,
+                });
+            } else {
+                setEditedData({
+                    registro_ppu: row.registro_ppu,
+                    etiqueta: row.etiqueta,
+                });
+            }
+            setEditingRowId(row.registro_ppu);
+        },
+        [role]
+    );
+
+    const handleSaveClick = useCallback(async () => {
+        if (!editedData?.registro_ppu) {
             alert("Error: Falta registro_ppu en los datos a actualizar.");
             return;
         }
         try {
-            // Ejemplo de prefijo "CASO " automático
-            if (
-                editedData.origen &&
-                /^\d/.test(editedData.origen) &&
-                !editedData.origen.startsWith("CASO ")
-            ) {
-                editedData.origen = `CASO ${editedData.origen}`;
-            }
-
-            // Eliminamos campos que no apliquen al tipo de registro, si así lo requieren
-            const { item, ...dataToSend } = editedData;
-            if (tipoRegistro === "LEGAJO") {
-                delete dataToSend.informe_juridico;
-            }
-            if (tipoRegistro === "DENUNCIA") {
-                delete dataToSend.origen;
-            }
-
-            console.log("handleSaveClick: Datos a enviar:", dataToSend);
-
+            const dataToSend = { ...editedData };
             await axios.post(`${API_BASE_URL}/api/actualizar_caso`, {
                 registro_ppu: dataToSend.registro_ppu,
-                data: dataToSend
+                data: dataToSend,
             });
-            setDatos(
-                datos.map((d) => (d.registro_ppu === dataToSend.registro_ppu ? dataToSend : d))
+
+            setDatos((prev) =>
+                prev.map((d) => (d.registro_ppu === dataToSend.registro_ppu ? { ...d, ...dataToSend } : d))
             );
+
             setEditingRowId(null);
             setEditedData({});
             alert("Caso actualizado.");
-        } catch (error) {
-            console.error("handleSaveClick: Error en la actualización:", error);
-            alert(`Error: ${error.response?.data?.error || error.message}`);
+        } catch (err) {
+            console.error("Error en la actualización:", err);
+            alert(`Error: ${err.response?.data?.error || err.message}`);
         }
-    };
-    // Ejemplo de función para activar la edición de una fila
-    const handleEditClick = (dato) => {
-        if (role === "admin") {
-            setEditedData({
-                registro_ppu: dato.registro_ppu,
-                e_situacional: dato.e_situacional,
-                abogado: dato.abogado,
-                denunciado: dato.denunciado,
-                origen: dato.origen,
-                "nr de exp completo": dato["nr de exp completo"],
-                delito: dato.delito,
-                departamento: dato.departamento,
-                fiscalia: dato.fiscalia,
-                juzgado: dato.juzgado,
-                informe_juridico: dato.informe_juridico,
-                fecha_ingreso: dato.fecha_ingreso,
-                last_modified: dato.last_modified,
-                etiqueta: dato.etiqueta
-            });
-        } else if (role === "user") {
-            // Al ser "user", solo preparamos 'registro_ppu' y 'etiqueta'
-            setEditedData({
-                registro_ppu: dato.registro_ppu,
-                etiqueta: dato.etiqueta
-            });
-        }
+    }, [API_BASE_URL, editedData]);
 
-        setEditingRowId(dato.registro_ppu);
-    };
+    const handleCloseBusquedaRapida = useCallback(() => {
+        setOpenBusquedaRapida(false);
+        setBusquedaRapidaRegistroPPU("");
+    }, []);
 
+    const handleGridRowDoubleClick = useCallback(
+        (params, event) => {
+            if (editingRowId) return;
 
-    // Estados y funciones para el modal avanzado y datos del caso
-
-
-
-
-
-
-
-
-
-
-  
-
-    // 2) Handler para selección de fiscalía
-    
-
-    // 3) Handler para cambio en “Caso fiscal corto”
-
-
-    // Estados y funciones para el historial
-    const [openHistorial, setOpenHistorial] = useState(false);
-    const handleCloseHistorial = () => {
-        setOpenHistorial(false);
-    };
-    const [selectedRegistroPPU, setSelectedRegistroPPU] = useState("");
-    const [showSituacionHistory, setShowSituacionHistory] = useState(false);
-    const [versionActual, setVersionActual] = useState(null);
-
-    const [situacionHistoryData, setSituacionHistoryData] = useState([]);
-    const [advancedModalOpen, setAdvancedModalOpen] = useState(false);
-
-
-
-
-
-
-
-
-    // Helper para extraer año de un 'registro_ppu' del tipo "D-123-2025-A" o "LEG-50-2025"
-    // Helper para extraer el año exacto del registro_ppu según los patrones backend
-    // Devuelve el segmento que realmente sea un año (4 dígitos) recorriendo
-    // los componentes del PPU desde el final hacia el inicio.
-    const extraerYear = (ppu = '') => {
-        if (!ppu) return null;
-
-        const partes = String(ppu).split('-');
-
-        // Recorremos de derecha a izquierda para priorizar el último "⁽4 dígitos⁾"
-        for (let i = partes.length - 1; i >= 0; i--) {
-            if (/^\d{4}$/.test(partes[i])) {
-                return partes[i];          // ← año encontrado (p.ej. 2018, 2023…)
+            const target = event?.target;
+            if (target?.closest) {
+                if (
+                    target.closest("button") ||
+                    target.closest("a") ||
+                    target.closest("input") ||
+                    target.closest("textarea") ||
+                    target.closest(".MuiButtonBase-root")
+                ) {
+                    return;
+                }
             }
-        }
 
-        return null;                    // si no se encontró ningún año válido
-    };
+            const reg = String(params?.row?.registro_ppu ?? params?.id ?? "").trim();
+            if (!reg) return;
 
-
-
-
-    // Dentro del componente Principal(), justo antes del `return (…)`:
-    const datosPorAno = useMemo(() => {
-        const grupos = {};
-        datos.forEach(dato => {
-            const year = extraerYear(dato.registro_ppu) || "Sin Año";
-            if (!grupos[year]) grupos[year] = [];
-            grupos[year].push(dato);
-        });
-
-        // Ordena cada grupo priorizando “D-” antes de “L.”, luego por número y sufijo
-        Object.values(grupos).forEach(filas => {
-            filas.sort((a, b) => {
-                // 1) Detectar tipo: denuncias (“D-”) vs legajos (“L.”)
-                const tipoA = a.registro_ppu?.startsWith("D-") ? 0 : 1;
-                const tipoB = b.registro_ppu?.startsWith("D-") ? 0 : 1;
-                if (tipoA !== tipoB) return tipoA - tipoB;
-
-                // 2) Ambos son del mismo tipo: extraer número y sufijo
-                const parsePPU = ppu => {
-                    const m = String(ppu).match(/^[A-Z]\.?\s*-\s*(\d+)-\d{4}(?:-(\w+))?/i);
-                    if (!m) return { num: 0, suf: "" };
-                    return { num: parseInt(m[1], 10), suf: m[2] || "" };
-                };
-                const pa = parsePPU(a.registro_ppu);
-                const pb = parsePPU(b.registro_ppu);
-
-                if (pa.num !== pb.num) return pa.num - pb.num;
-                if (pa.suf === pb.suf) return 0;
-                if (pa.suf === "") return -1;
-                if (pb.suf === "") return 1;
-                return pa.suf.localeCompare(pb.suf);
-            });
-        });
-
-        const arrayOrdenado = Object.entries(grupos)
-            .sort((a, b) => {
-                if (a[0] === "Sin Año") return 1;
-                if (b[0] === "Sin Año") return -1;
-                return Number(b[0]) - Number(a[0]);
-            });
-        return arrayOrdenado;
-    }, [datos]);
-
-
-
-
-    /* ================== DataGrid helpers ================== */
-    /* 1 ▸ Columnas ──────── */
-    const fullColumns = [
-        { field: 'registro_ppu', headerName: 'PPU', width: 120 },
-        { field: 'e_situacional', headerName: 'Situación', width: 110 },
-        { field: 'abogado', headerName: 'Abogado', width: 130 },
-        { field: 'denunciado', headerName: 'Denunciado', flex: 1 },
-        { field: 'origen', headerName: 'Fiscal corto / Exp.', flex: 1 },
-        { field: 'nrExpCompleto', headerName: 'Fiscal completo', flex: 1 },
-        { field: 'delito', headerName: 'Delito', flex: 1 },
-        { field: 'departamento', headerName: 'Dpto.', width: 100 },
-        { field: 'fiscalia', headerName: 'Fiscalía', flex: 1 },
-        { field: 'juzgado', headerName: 'Juzgado', flex: 1 },
-        { field: 'informe_juridico', headerName: 'Informe Jurídico', flex: 1 },
-        { field: 'fecha_ingreso', headerName: 'Ingreso', width: 115 },
-        { field: 'last_modified', headerName: 'Modificación', width: 115 },
-
-        /* ────── AQUÍ SE AÑADE LA CLASE CONDICIONAL ────── */
-        {
-            field: 'etiqueta',
-            headerName: 'Etiqueta',
-            width: 110,
-            cellClassName: (params) =>
-                params.value === 'ARCHIVO' ? 'etiqueta-archivo' : '',
+            setSelectedRegistroPPU(reg);
+            setBusquedaRapidaRegistroPPU(reg);
+            setOpenBusquedaRapida(true);
         },
+        [editingRowId]
+    );
 
-        {
-            field: 'acciones',
-            headerName: 'Acciones',
-            width: 200,
-            sortable: false,
-            filterable: false,
-            renderCell: ({ row }) => {
-                if (row.type === 'yearHeader') return null;
-                const isEditing = editingRowId === row.registro_ppu;
-                return (
-                    <Box display="flex" gap={1}>
-                        <Button
-                            size="small"
-                            variant="contained"
-                            onClick={() =>
-                                isEditing ? handleSaveClick() : handleEditClick(row)
-                            }
-                        >
-                            {isEditing ? 'Guardar' : 'Modificar'}
-                        </Button>
-                        <Button
-                            size="small"
+    const renderEditable = useCallback(
+        (params) => {
+            if (editingRowId === params.row.registro_ppu) {
+                if (role === "admin" || (role === "user" && params.field === "etiqueta")) {
+                    return (
+                        <TextField
+                            value={editedData[params.field] ?? ""}
+                            onChange={(e) => setEditedData({ ...editedData, [params.field]: e.target.value })}
                             variant="outlined"
-                            onClick={() => {
-                                setSelectedRegistroPPU(row.registro_ppu);
-                                setAdvancedModalOpen(true);
+                            size="small"
+                            fullWidth
+                            sx={{
+                                "& .MuiOutlinedInput-root": {
+                                    backgroundColor: "#fff",
+                                    borderRadius: 1.5,
+                                },
                             }}
-                        >
-                            Avanzado
-                        </Button>
-                    </Box>
-                );
-            },
+                        />
+                    );
+                }
+            }
+            return params.value;
         },
-    ];
+        [editingRowId, role, editedData]
+    );
 
+    const renderSituacionConHistorial = useCallback(
+        (params) => {
+            const row = params?.row || {};
+            const ppu = String(row?.registro_ppu || "").trim();
+            const isEditing = editingRowId === row.registro_ppu;
 
-    /* 2 ▸ Column-visibility según “headerPage” ───── */
-    const half = Math.ceil(fullColumns.length / 2);     // 15 → 8 & 7
-    const columnVisibilityModel = useMemo(() => {
-        const visibleFirst = new Set(fullColumns.slice(0, half).map(c => c.field));
-        const visibleSecond = new Set(fullColumns.slice(half).map(c => c.field));
-        const visible = headerPage === 1 ? visibleFirst : visibleSecond;
-
-        /* Registro PPU y Acciones deben estar siempre */
-        visible.add('registro_ppu').add('acciones');
-
-        const model = {};
-        fullColumns.forEach(c => { model[c.field] = visible.has(c.field); });
-        return model;
-    }, [headerPage]);
-
-    /* 3 ▸ Transformar datos → rows (con alias y fila-año) ───── */
-    const gridRows = useMemo(() => {
-        const rows = [];
-        datosPorAno.forEach(([year, filas]) => {
-            rows.push({
-                id: `year-${year}`,
-                type: 'yearHeader',
-                registro_ppu: `AÑO ${year}`,
-            });
-            filas.forEach(f => rows.push({
-                id: f.registro_ppu,
-                ...f,
-                nrExpCompleto: f['nr de exp completo'],
-            }));
-        });
-        return rows;
-    }, [datosPorAno]);
-
-    /* 4 ▸ Render cell especial para cabecera-año + edición condicional ───── */
-    const renderEditable = (params) => {
-        /* fila de año → celda fusionada visualmente */
-        if (params.row.type === 'yearHeader') {
-            return (
-                <Box sx={{ fontWeight: 'bold', width: '100%', textAlign: 'center' }}>
-                    {params.value}
-                </Box>
-            );
-        }
-        /* celdas normales + edición */
-        if (editingRowId === params.row.registro_ppu) {
-            if (role === 'admin' || (role === 'user' && params.field === 'etiqueta')) {
+            if (isEditing && role === "admin") {
                 return (
                     <TextField
-                        value={editedData[params.field] ?? ''}
-                        onChange={(e) =>
-                            setEditedData({ ...editedData, [params.field]: e.target.value })
-                        }
+                        value={editedData["e_situacional"] ?? ""}
+                        onChange={(e) => setEditedData({ ...editedData, e_situacional: e.target.value })}
                         variant="outlined"
                         size="small"
                         fullWidth
+                        sx={{
+                            "& .MuiOutlinedInput-root": {
+                                backgroundColor: "#fff",
+                                borderRadius: 1.5,
+                            },
+                        }}
                     />
                 );
             }
-        }
-        return params.value;
-    };
 
-    /* añadimos ‘renderCell’ a todas las columnas salvo ‘acciones’ */
-    const columns = fullColumns.map(col =>
-        col.field === 'acciones' ? col : { ...col, renderCell: renderEditable });
+            const value = String(params?.value ?? "").trim();
+            const avail = historyAvailRef.current.get(ppu);
+            const state = avail?.state || "unknown"; // unknown | loading | yes | no
 
-    /* 5 ▸ Función para asignar clases de fila — ahora detecta “Archivo” */
-    /* 5 ▸ Función para asignar clases de fila — ahora detecta “ARCHIVO” sin importar el caso */
-    const getRowClassName = (params) => {
-        const classes = [];
-        if (params.row.type === 'yearHeader') classes.push('year-row');
-
-        if (
-            String(params.row.etiqueta || '')
-                .trim()
-                .toUpperCase() === 'ARCHIVO'
-        ) {
-            classes.push('row-archivo');
-        }
-
-        return classes.join(' ');
-    };
-
-
-    // ─────────────────────────  CustomToolbar completo  ─────────────────────────
-    // Archivo: src/components/common-principal/BusquedaRapida.jsx
-
-    const abogadosPermitidos = {
-        jpolom: 'POLO',
-        enavarro: 'NAVARRO',
-        mpalacios: 'PALACIOS',
-        imartinez: 'MARTINEZ',
-        mrojas: 'ROJAS',
-        mfrisancho: 'FRISANCHO',
-        tpomar: 'POMAR',
-        dflores: 'FLORES',
-        zaguilar: 'AGUILAR',
-        mmau: 'MAU',
-        fascurra: 'ASCURRA',
-        ncuba: 'CUBA'
-    };
-
-    const CustomToolbar = () => {
-        const [openElegirAbogado, setOpenElegirAbogado] = useState(false);
-        const [abogadoSeleccionadoLocal, setAbogadoSeleccionadoLocal] = useState(selectedAbogado || '');
-
-        const filasParaExcel = gridRows.filter(r => r.type !== 'yearHeader');
-
-        const opcionesAbogado = useMemo(() => {
-            const labelsPermitidos = new Set(Object.values(abogadosPermitidos));
-            const setLabels = new Set(
-                filasParaExcel
-                    .map(r => (r.abogado || '').toString().trim().toUpperCase())
-                    .filter(a => a && labelsPermitidos.has(a))
-            );
-            return Array.from(setLabels).sort();
-        }, [filasParaExcel]);
-
-        const handleExportClick = () => {
-            if (role === 'admin') {
-                exportarExcelCustom(filasParaExcel, columns);
-            } else {
-                const candidato = (selectedAbogado || '').toString().trim().toUpperCase();
-                const defaultOpcion = opcionesAbogado.includes(candidato) ? candidato : (opcionesAbogado[0] || '');
-                setAbogadoSeleccionadoLocal(defaultOpcion);
-                setOpenElegirAbogado(true);
-            }
-        };
-
-        const confirmarExportPorAbogado = () => {
-            const abogadoMatch = (abogadoSeleccionadoLocal || '').toString().trim().toUpperCase();
-            const filasFiltradas = filasParaExcel.filter(r =>
-                (r.abogado || '').toString().trim().toUpperCase() === abogadoMatch
-            );
-
-            if (filasFiltradas.length === 0) {
-                alert('No hay registros de su selección');
-                return;
+            if (ppu && state === "unknown" && !historyAvailInflightRef.current.has(ppu)) {
+                historyAvailInflightRef.current.add(ppu);
+                Promise.resolve().then(async () => {
+                    try {
+                        await ensureHistoryPdfAvailability(ppu);
+                    } finally {
+                        historyAvailInflightRef.current.delete(ppu);
+                    }
+                });
             }
 
-            exportarExcelCustom(filasFiltradas, columns);
-            setOpenElegirAbogado(false);
-        };
+            const isLoadingBtn = state === "unknown" || state === "loading";
+            const hasPdf = state === "yes";
+            const disabled = !hasPdf;
 
-        return (
-            <GridToolbarContainer sx={{ gap: 1, p: 1 }}>
-                <GridToolbarColumnsButton />
-                <GridToolbarFilterButton />
-                <GridToolbarDensitySelector />
+            const disabledTip = isLoadingBtn
+                ? "Verificando si existe PDF en historial…"
+                : "No hay PDF disponible en el historial de este PPU.";
 
-                <Button
-                    startIcon={<DownloadIcon />}
-                    onClick={handleExportClick}
-                    sx={{ textTransform: 'none' }}
-                >
-                    Exportar&nbsp;selección&nbsp;actual
-                </Button>
-
-                <GridToolbarQuickFilter
-                    placeholder="Búsqueda local"
-                    quickFilterParser={input => input.split(/[, ]+/).filter(Boolean)}
-                />
-
-                <Dialog open={openElegirAbogado} onClose={() => setOpenElegirAbogado(false)} fullWidth maxWidth="xs">
-                    <DialogTitle>Elija abogado</DialogTitle>
-                    <DialogContent>
-                        <TextField
-                            select
-                            fullWidth
-                            label="Abogado"
-                            value={abogadoSeleccionadoLocal}
-                            onChange={(e) => setAbogadoSeleccionadoLocal(e.target.value)}
-                            autoFocus
-                            margin="dense"
-                        >
-                            {opcionesAbogado.map(label => (
-                                <MenuItem key={label} value={label}>
-                                    {label}
-                                </MenuItem>
-                            ))}
-                        </TextField>
-                    </DialogContent>
-                    <DialogActions>
-                        <Button onClick={() => setOpenElegirAbogado(false)}>Cancelar</Button>
-                        <Button
-                            variant="contained"
-                            onClick={confirmarExportPorAbogado}
-                            disabled={!abogadoSeleccionadoLocal?.trim()}
-                        >
-                            Exportar
-                        </Button>
-                    </DialogActions>
-                </Dialog>
-            </GridToolbarContainer>
-        );
-    };
-
-    const [colVis, setColVis] = useState(columnVisibilityModel);   // copia inicial
-
-    /* —— Plantilla completa en castellano —— */
-    const localeES = {
-        ...esES.components.MuiDataGrid.defaultProps.localeText,
-
-        /* ▸ Overlays */
-        noRowsLabel: 'Sin filas',
-        noResultsOverlayLabel: 'Sin resultados',
-        errorOverlayDefaultLabel: 'Ha ocurrido un error.',
-
-        /* ▸ Barra de herramientas */
-        toolbarColumns: 'Columnas',
-        toolbarColumnsLabel: 'Mostrar selector de columnas',
-        toolbarFilters: 'Filtros',
-        toolbarFiltersLabel: 'Mostrar filtros',
-        toolbarFiltersTooltipHide: 'Ocultar filtros',
-        toolbarFiltersTooltipShow: 'Mostrar filtros',
-        toolbarDensity: 'Densidad',
-        toolbarDensityLabel: 'Densidad',
-        toolbarDensityCompact: 'Compacta',
-        toolbarDensityStandard: 'Estándar',
-        toolbarDensityComfortable: 'Cómoda',
-        toolbarExport: 'Exportar',
-        toolbarExportLabel: 'Exportar',
-        toolbarExportCSV: 'Descargar CSV',
-        toolbarExportPrint: 'Imprimir',
-        toolbarExportExcel: 'Descargar Excel',
-        toolbarQuickFilterPlaceholder: 'Buscar…',
-        toolbarQuickFilterLabel: 'Buscar',
-        toolbarQuickFilterDeleteIconLabel: 'Limpiar',
-
-        /* ▸ Panel de columnas */
-        columnsPanelTextFieldLabel: 'Buscar columna',
-        columnsPanelTextFieldPlaceholder: 'Título',
-        columnsPanelDragIconLabel: 'Reordenar',
-        columnsPanelShowAllButton: 'Mostrar todas',
-        columnsPanelHideAllButton: 'Ocultar todas',
-
-        /* ▸ Panel de filtros */
-        filterPanelAddFilter: 'Añadir filtro',
-        filterPanelDeleteIconLabel: 'Eliminar',
-        filterPanelOperators: 'Operadores',
-        filterPanelOperatorAnd: 'Y',
-        filterPanelOperatorOr: 'O',
-        filterPanelColumns: 'Columnas',
-        filterPanelInputLabel: 'Valor',
-        filterPanelInputPlaceholder: 'Valor de filtro…',
-
-        /* ▸ Operadores de filtro */
-        filterOperatorContains: 'contiene',
-        filterOperatorEquals: 'igual a',
-        filterOperatorStartsWith: 'empieza por',
-        filterOperatorEndsWith: 'termina en',
-        filterOperatorIs: 'es',
-        filterOperatorNot: 'no es',
-        filterOperatorAfter: 'después de',
-        filterOperatorOnOrAfter: 'en o después de',
-        filterOperatorBefore: 'antes de',
-        filterOperatorOnOrBefore: 'en o antes de',
-        filterOperatorIsEmpty: 'está vacío',
-        filterOperatorIsNotEmpty: 'no está vacío',
-        filterOperatorIsAnyOf: 'es cualquiera de',
-
-        /* ▸ Valores booleanos del filtro */
-        filterValueAny: 'cualquiera',
-        filterValueTrue: 'verdadero',
-        filterValueFalse: 'falso',
-
-        /* ▸ Encabezado de columna */
-        columnHeaderFiltersTooltipActive: (count) =>
-            count !== 1 ? `${count} filtros` : `${count} filtro`,
-        columnHeaderFiltersLabel: 'Mostrar filtros',
-        columnHeaderSortIconLabel: 'Ordenar',
-
-        /* ▸ Footer */
-        footerRowSelected: (count) =>
-            count !== 1
-                ? `${count.toLocaleString()} filas seleccionadas`
-                : `${count.toLocaleString()} fila seleccionada`,
-        footerTotalRows: 'Filas totales:',
-        footerTotalVisibleRows: (visibleCount, totalCount) =>
-            `${visibleCount.toLocaleString()} de ${totalCount.toLocaleString()}`,
-        footerPaginationRowsPerPage: 'Filas por página:',
-        footerPaginationOf: (first, last, total) =>
-            `${first}–${last} de ${total.toLocaleString()}`,
-        footerFilteredRowsCount: (count) =>
-            `${count.toLocaleString()} resultado(s)`,
-
-        /* ▸ Agrupación (DataGrid Pro/Premium) */
-        groupedColumnHeaderName: 'Agrupado',
-        groupedColumnTooltip: 'Desagrupar',
-
-        ungroupedColumnHeaderName: 'Desagrupado',
-        ungroupedColumnTooltip: 'Agrupar por esta columna',
-
-        /* ▸ Columnas agrupadas arrastrables (v6+) */
-        rowGroupPanelOnDrop: 'Suelta aquí una columna para agrupar',
-        rowGroupPanelTitle: 'Columnas agrupadas',
-
-        /* ▸ Column reordering / pinning */
-        columnMenuUnsort: 'Quitar orden',
-        columnMenuSortAsc: 'Orden ascendente',
-        columnMenuSortDesc: 'Orden descendente',
-        columnMenuFilter: 'Filtrar',
-        columnMenuHideColumn: 'Ocultar',
-        columnMenuShowColumns: 'Mostrar columnas',
-        columnMenuManageColumns: 'Gestionar columnas',
-        columnMenuPinLeft: 'Fijar a la izquierda',
-        columnMenuPinRight: 'Fijar a la derecha',
-        columnMenuUnpin: 'Desfijar',
-
-        /* ▸ Agrupación por columnas (drag & drop header) */
-        rowGroupPanelPlaceholder: 'Arrastra aquí encabezados…',
-
-        /* ▸ Detalles de fila (tree data) */
-        treeDataGroupingHeaderName: 'Jerarquía',
-        treeDataExpand: 'ver hijos',
-        treeDataCollapse: 'ocultar hijos',
-        groupingColumnHeaderName: 'Grupo',
-
-        /* ▸ Columnas de detalle de fila (master/detail) */
-        detailPanelToggle: 'Alternar panel de detalle',
-        expandDetailPanel: 'Expandir',
-        collapseDetailPanel: 'Contraer',
-    };
-    // ─── Early return SOLO después de definir todos los hooks ───────────
-    if (openBusquedaRapida) {
-        return (
-            <BusquedaRapida
-                open={openBusquedaRapida}
-                onClose={() => setOpenBusquedaRapida(false)}
-            />
-        );
-    }
-    return (
-        <>
-            {tab === 0 && (
-                <>
-                    {/* ➜ Botón de Ingresos (aparece si whoami.role === 'admin') */}
-                    <Box mb={2}>
-                        <Ingresos onRefresh={() => buscarDatos(1, query)} query={query} />
-
+            return (
+                <Box sx={{ display: "flex", flexDirection: "column", gap: 0.9, width: "100%" }}>
+                    <Box
+                        sx={{
+                            fontSize: "0.78rem",
+                            fontWeight: 850,
+                            lineHeight: "1.15rem",
+                            // ✅ FIX REAL: NO PISAR COLOR DEL ROW ARCHIVADO
+                            // (así en archivado hereda blanco del .row-archivo)
+                            color: "inherit",
+                            display: "-webkit-box",
+                            WebkitLineClamp: 6,
+                            WebkitBoxOrient: "vertical",
+                            overflow: "hidden",
+                            whiteSpace: "pre-wrap",
+                        }}
+                    >
+                        {value || "—"}
                     </Box>
 
-                    <Button
-                        variant="contained"
-                        color="info"
-                        onClick={() => setOpenBusquedaRapida(true)}
-                    >
-                        Edición Rápida - recepción directa
-                    </Button>
-
-
-                    {/* El modal externo */}
-                    <BusquedaRapida
-                        open={openBusquedaRapida}
-                        onClose={() => setOpenBusquedaRapida(false)}
-                    />
-                    {searchMode && queryNotificacion.trim() === "" ? (
-                        <Typography variant="body1" align="center">
-                            Ingrese un criterio de búsqueda para mostrar resultados.
-                        </Typography>
-                    ) : (
-                        <>
-                            <Box mb={2}>
-                                <Grid container spacing={2} alignItems="center">
-                                    {/* 1) Buscador Global */}
-                                    <Grid item xs={12} md={3}>
-                                        <TextField
-                                            label="Búsqueda global"
-                                            variant="outlined"
-                                            value={query}
-                                            onChange={handleQueryChange}
-                                            fullWidth
-                                        />
-                                    </Grid>
-
-                                    {/* 2) Filtro Año */}
-                                    <Grid item xs={6} md={2}>
-                                        <FormControl fullWidth size="small">
-                                            <InputLabel id="filtro-year-label">Año</InputLabel>
-                                            <Select
-                                                labelId="filtro-year-label"
-                                                // Si availableYears aún está vacío, mostramos valor "" para evitar out-of-range
-                                                value={availableYears.length > 0 ? filtroYear : ""}
-                                                label="Año"
-                                                onChange={(e) => {
-                                                    setFiltroYear(e.target.value);
-                                                    setPage(1);
-                                                    buscarDatos(1, query);
-                                                }}
-                                            >
-                                                {/* Sólo listamos los años que vienen de availableYears */}
-                                                {availableYears.map((yr) => (
-                                                    <MenuItem key={yr} value={yr}>
-                                                        {yr}
-                                                    </MenuItem>
-                                                ))}
-                                            </Select>
-                                        </FormControl>
-
-                                    </Grid>
-
-                                    {/* 3) Filtro Tipo */}
-                                    <Grid item xs={6} md={2}>
-                                        <FormControl fullWidth size="small">
-                                            <InputLabel id="filtro-tipo-label">Tipo</InputLabel>
-                                            <Select
-                                                labelId="filtro-tipo-label"
-                                                value={filtroTipo}
-                                                label="Tipo"
-                                                onChange={(e) => {
-                                                    setFiltroTipo(e.target.value);
-                                                    setPage(1);
-                                                    buscarDatos(1, query);
-                                                }}
-                                            >
-                                                <MenuItem value="ALL">Todos</MenuItem>
-                                                <MenuItem value="DENUNCIA">Denuncias</MenuItem>
-                                                <MenuItem value="LEGAJO">Legajos</MenuItem>
-                                            </Select>
-                                        </FormControl>
-                                    </Grid>
-
-                                    <Grid item xs={12} md={3}>
-                                        {role === "admin" ? (
-                                            <LawyerFilter
-                                                role={role}
-                                                username={username}
-                                                selectedAbogadoPlazos={selectedAbogado}
-                                                setSelectedAbogadoPlazos={setSelectedAbogado}
-                                                debouncedBuscarPlazosData={buscarDatos}
-                                                queryPlazos={query}
-                                                mostrarArchivadosPlazos={mostrarArchivados}
-                                                setPagePlazos={setPage}
-                                            />
+                    {!!ppu && (
+                        <Tooltip title={disabled ? disabledTip : "Ver historial de SITUACIÓN (con PDF)"} arrow>
+                            <span>
+                                <Button
+                                    size="small"
+                                    variant="outlined"
+                                    disabled={disabled}
+                                    onClick={(e) => {
+                                        e.stopPropagation();
+                                        openHistoryForPPU(ppu);
+                                    }}
+                                    startIcon={
+                                        isLoadingBtn ? (
+                                            <CircularProgress size={14} />
+                                        ) : hasPdf ? (
+                                            <HistoryRoundedIcon fontSize="small" />
                                         ) : (
-                                            <Typography variant="body2" sx={{ fontStyle: "italic" }}>
-                                                Abogado: {username.toUpperCase()} (filtro forzado)
-                                            </Typography>
-                                        )}
-
-                                    </Grid>
-
-                                    <Grid item xs={12} md={2}>
-                                        <FormControlLabel
-                                            control={
-                                                <Checkbox
-                                                    checked={mostrarArchivados}
-                                                    onChange={(e) => {
-                                                        setMostrarArchivados(e.target.checked);
-                                                        setPage(1);
-                                                        buscarDatos(1, query);
-                                                    }}
-                                                    color="primary"
-                                                />
-                                            }
-                                            label="¿Mostrar archivados?"
-                                        />
-                                    </Grid>
-
-                                    <Grid item xs={12} md={2}>
-                                        <Button
-                                            variant="outlined"
-                                            onClick={() => {
-                                                setQuery("");
-                                                setFiltroYear(availableYears[0] || "");
-                                                setFiltroTipo("ALL");
-                                                setSelectedAbogado("");
-                                                setMostrarArchivados(false);
-                                                setPage(1);
-                                                buscarDatos(1, "");
-                                            }}
-                                            fullWidth
-                                        >
-                                            Limpiar filtros
-                                        </Button>
-                                    </Grid>
-
-                                    {role === "admin" && (
-                                        <Grid item xs={12} md={3}>
-                                            <Button
-                                                variant="contained"
-                                                color="success"
-                                                onClick={exportarExcel}
-                                                fullWidth
-                                                sx={{ height: 56 }}
-                                            >
-                                                Exportación global
-                                            </Button>
-                                        </Grid>
-                                    )}
-
-
-                                    </Grid>
-
-
-                                </Box>
-
-                                <Box mb={2}>
-                                    <Typography variant="h6" component="div">
-                                        Total de Procesos: {totalRecords}
-                                    </Typography>
-                                </Box>
-
-
-
-                            <Modal open={openHistorial} onClose={handleCloseHistorial}>
-                                <Box
-                                    sx={{
-                                        position: "absolute",
-                                        top: "50%",
-                                        left: "50%",
-                                        transform: "translate(-50%, -50%)",
-                                        width: "80%",
-                                        maxWidth: "900px",
-                                        bgcolor: "background.paper",
-                                        border: "2px solid #000",
-                                        boxShadow: 24,
-                                        p: 4,
-                                        maxHeight: "80vh",
-                                        overflowY: "auto"
-                                    }}
-                                >
-                                    <Typography variant="h6" component="h2" sx={{ mb: 2 }}>
-                                        Historial del Registro: {selectedRegistroPPU}
-                                    </Typography>
-                                    <Button
-                                        variant="contained"
-                                        color="secondary"
-                                        onClick={() => setShowSituacionHistory(!showSituacionHistory)}
-                                        sx={{ mb: 2 }}
-                                    >
-                                        {showSituacionHistory ? "Ver Historial Completo" : "Historial de Situación"}
-                                    </Button>
-                                    {!showSituacionHistory ? (
-                                        <>
-                                            <Typography variant="h6" component="h3" style={{ marginTop: "20px" }}>
-                                                Versión Actual
-                                            </Typography>
-                                            {versionActual ? (
-                                                <TableContainer component={Paper} sx={{ mt: 1 }}>
-                                                    <Table>
-                                                        <TableHead>
-                                                            <TableRow>
-                                                                <TableCell>Version</TableCell>
-                                                                <TableCell>Abogado</TableCell>
-                                                                <TableCell>Registro PPU</TableCell>
-                                                                <TableCell>Denunciado</TableCell>
-                                                                <TableCell>Caso fiscal corto</TableCell>
-                                                                <TableCell>Juzgado</TableCell>
-                                                                <TableCell>Fiscalia</TableCell>
-                                                                <TableCell>Departamento</TableCell>
-                                                                <TableCell>Situación</TableCell>
-                                                                <TableCell>Fecha versión</TableCell>
-                                                                <TableCell>Autor</TableCell>
-                                                            </TableRow>
-                                                        </TableHead>
-                                                        <TableBody>
-                                                            <TableRow>
-                                                                <TableCell>{versionActual.version_id}</TableCell>
-                                                                <TableCell>{versionActual.abogado}</TableCell>
-                                                                <TableCell>{versionActual.registro_ppu}</TableCell>
-                                                                <TableCell>{versionActual.denunciado}</TableCell>
-                                                                <TableCell>{versionActual.origen}</TableCell>
-                                                                <TableCell>{versionActual.juzgado}</TableCell>
-                                                                <TableCell>{versionActual.fiscalia}</TableCell>
-                                                                <TableCell>{versionActual.departamento}</TableCell>
-                                                                <TableCell>{versionActual.e_situacional}</TableCell>
-                                                                <TableCell>{versionActual.fecha_version}</TableCell>
-                                                                <TableCell>N/A</TableCell>
-                                                            </TableRow>
-                                                        </TableBody>
-                                                    </Table>
-                                                </TableContainer>
-                                            ) : (
-                                                <Typography>No hay datos de la versión actual.</Typography>
-                                            )}
-                                            <Typography variant="h6" component="h3" style={{ marginTop: "20px" }}>
-                                                Historial de Versiones Anteriores
-                                            </Typography>
-                                            {historialData.length > 0 ? (
-                                                <TableContainer component={Paper} sx={{ mt: 1 }}>
-                                                    <Table>
-                                                        <TableHead>
-                                                            <TableRow>
-                                                                <TableCell>Version</TableCell>
-                                                                <TableCell>Abogado</TableCell>
-                                                                <TableCell>Registro PPU</TableCell>
-                                                                <TableCell>Denunciado</TableCell>
-                                                                <TableCell>Caso fiscal corto</TableCell>
-                                                                <TableCell>Juzgado</TableCell>
-                                                                <TableCell>Fiscalia</TableCell>
-                                                                <TableCell>Departamento</TableCell>
-                                                                <TableCell>Situación</TableCell>
-                                                                <TableCell>Fecha versión</TableCell>
-                                                                <TableCell>Autor</TableCell>
-                                                            </TableRow>
-                                                        </TableHead>
-                                                        <TableBody>
-                                                            {historialData.map((entry, index) => (
-                                                                <TableRow key={index}>
-                                                                    <TableCell>{entry.version_id}</TableCell>
-                                                                    <TableCell>{entry.abogado}</TableCell>
-                                                                    <TableCell>{entry.registro_ppu}</TableCell>
-                                                                    <TableCell>{entry.denunciado}</TableCell>
-                                                                    <TableCell>{entry.origen}</TableCell>
-                                                                    <TableCell>{entry.juzgado}</TableCell>
-                                                                    <TableCell>{entry.fiscalia}</TableCell>
-                                                                    <TableCell>{entry.departamento}</TableCell>
-                                                                    <TableCell>{entry.e_situacional}</TableCell>
-                                                                    <TableCell>{entry.fecha_version}</TableCell>
-                                                                    <TableCell>{entry.usuario_modificacion}</TableCell>
-                                                                </TableRow>
-                                                            ))}
-                                                        </TableBody>
-                                                    </Table>
-                                                </TableContainer>
-                                            ) : (
-                                                <Typography>No hay datos de historial anteriores.</Typography>
-                                            )}
-                                        </>
-                                    ) : (
-                                        <>
-                                            <Typography variant="h6" component="h3" style={{ marginTop: "20px" }}>
-                                                Historial de Cambios en la Situación
-                                            </Typography>
-                                            {situacionHistoryData.length > 0 ? (
-                                                <TableContainer component={Paper} sx={{ mt: 1 }}>
-                                                    <Table>
-                                                        <TableHead>
-                                                            <TableRow>
-                                                                <TableCell>Versión</TableCell>
-                                                                <TableCell>Abogado</TableCell>
-                                                                <TableCell>Caso fiscal corto</TableCell>
-                                                                <TableCell>Situación</TableCell>
-                                                                <TableCell>Ruta PDF</TableCell>
-                                                            </TableRow>
-                                                        </TableHead>
-                                                        <TableBody>
-                                                            {situacionHistoryData.map((entry, i) => (
-                                                                <TableRow key={i}>
-                                                                    <TableCell>{entry.version_id}</TableCell>
-                                                                    <TableCell>{entry.abogado}</TableCell>
-                                                                    <TableCell>{entry.origen}</TableCell>
-                                                                    <TableCell>{entry.e_situacional}</TableCell>
-                                                                    <TableCell>
-                                                                        {entry.ruta ? (
-                                                                            <a
-                                                                                href={`file://${entry.ruta}`}
-                                                                                style={{ textDecoration: "none", color: "blue" }}
-                                                                                onClick={(e) => {
-                                                                                    e.preventDefault();
-                                                                                    window.open(
-                                                                                        `${API_BASE_URL}/api/descargar_pdf?ruta=${encodeURIComponent(
-                                                                                            entry.ruta
-                                                                                        )}`,
-                                                                                        "_blank"
-                                                                                    );
-                                                                                }}
-                                                                            >
-                                                                                Ver PDF
-                                                                            </a>
-                                                                        ) : (
-                                                                            "Sin PDF"
-                                                                        )}
-                                                                    </TableCell>
-                                                                </TableRow>
-                                                            ))}
-                                                        </TableBody>
-                                                    </Table>
-                                                </TableContainer>
-                                            ) : (
-                                                <Typography>No hay cambios en la situación.</Typography>
-                                            )}
-                                        </>
-                                    )}
-                                </Box>
-                            </Modal>
-                            <Modal open={advancedModalOpen} onClose={() => setAdvancedModalOpen(false)}>
-                                <Box
-                                    sx={{
-                                        position: "absolute",
-                                        top: "50%",
-                                        left: "50%",
-                                        transform: "translate(-50%, -50%)",
-                                        width: 400,
-                                        bgcolor: "background.paper",
-                                        border: "2px solid #000",
-                                        boxShadow: 24,
-                                        p: 4
-                                    }}
-                                >
-                                    <Button
-                                        variant="contained"
-                                        color="secondary"
-                                        onClick={() => {
-                                            // Lógica para abrir historial avanzado
-                                            setSelectedRegistroPPU(selectedRegistroPPU);
-                                            setAdvancedModalOpen(false);
-                                        }}
-                                        fullWidth
-                                    >
-                                        Historial
-                                    </Button>
-                                </Box>
-                            </Modal>
-
-                            {/* ───── Tabla principal (DataGrid virtualizado) ───── */}
-                            <Box sx={{ height: 600, width: '100%' }}>
-                                <DataGrid
-                                    rows={gridRows}
-                                    columns={columns}
-                                    localeText={localeES}
-                                    slots={{ toolbar: CustomToolbar }}
-                                    getRowId={(r) => r.id}
-                                    columnVisibilityModel={colVis}
-                                    onColumnVisibilityModelChange={(newModel) => setColVis(newModel)}
-                                    disableRowSelectionOnClick
-                                    getRowHeight={(params) =>
-                                        params.model.type === 'yearHeader' ? 32 : 'auto'
+                                            <HistoryRoundedIcon fontSize="small" />
+                                        )
                                     }
-                                    getRowClassName={getRowClassName}
-                                    pagination
-                                    pageSizeOptions={[50, 100, 200]}
-                                    initialState={{
-                                        pagination: { paginationModel: { pageSize: 50 } },
-                                    }}
                                     sx={{
-                                        fontSize: '0.75rem',
+                                        textTransform: "none",
+                                        fontWeight: 950,
+                                        borderRadius: 1.7,
+                                        height: 30,
+                                        px: 1.25,
+                                        borderColor: "#D1D5DB",
+                                        color: "#111827",
+                                        backgroundColor: "rgba(255,255,255,0.92)",
+                                        boxShadow: "0 1px 0 rgba(0,0,0,0.04)",
+                                        "&:hover": {
+                                            borderColor: "#9CA3AF",
+                                            backgroundColor: "#F3F4F6",
+                                        },
+                                        "&.Mui-disabled": {
+                                            color: "rgba(17,24,39,0.45)",
+                                            borderColor: "#E5E7EB",
+                                            backgroundColor: "#F3F4F6",
+                                            boxShadow: "none",
+                                        },
+                                    }}
+                                >
+                                    Historial
+                                </Button>
+                            </span>
+                        </Tooltip>
+                    )}
 
-                                        /* —— comportamiento por defecto de TODA celda —— */
-                                        '& .MuiDataGrid-cell': {
-                                            whiteSpace: 'normal !important',   // permite el salto de línea
-                                            wordBreak: 'break-word',           // corta palabras muy largas
-                                            lineHeight: '1.25rem',             // un poco más de altura
-                                            padding: '6px 8px',                // margen interno uniforme
-                                            alignItems: 'flex-start',          // texto pegado arriba
-                                            borderRight: '1px solid #d0d0d0',  // NUEVO: línea vertical entre celdas
-                                        },
+                    {/* fuerza rerender por tick */}
+                    <Box sx={{ display: "none" }}>{historyAvailTick}</Box>
+                </Box>
+            );
+        },
+        [editingRowId, role, editedData, openHistoryForPPU, ensureHistoryPdfAvailability, historyAvailTick]
+    );
 
-                                        /* —— línea horizontal entre filas —— */
-                                        '& .MuiDataGrid-row': {
-                                            borderBottom: '1px solid #d0d0d0',
-                                        },
+    const fullColumns = useMemo(
+        () => [
+            {
+                field: "registro_ppu",
+                headerName: "PPU",
+                width: 130,
+                headerClassName: "colhdr-key",
+                cellClassName: "cell-key",
+            },
+            {
+                field: "e_situacional",
+                headerName: "SITUACIÓN",
+                width: 240,
+                headerClassName: "colhdr-key",
+                cellClassName: "cell-key",
+                sortable: false,
+                renderCell: renderSituacionConHistorial,
+            },
+            {
+                field: "abogado",
+                headerName: "ABOGADO",
+                width: 160,
+                headerClassName: "colhdr-key",
+                cellClassName: "cell-key",
+            },
+            { field: "denunciado", headerName: "Denunciado", minWidth: 240, flex: 1 },
+            { field: "origen", headerName: "Fiscal corto / Exp.", minWidth: 200, flex: 1 },
+            { field: "nr de exp completo", headerName: "Fiscal completo", minWidth: 220, flex: 1 },
+            { field: "delito", headerName: "Delito", minWidth: 240, flex: 1 },
+            { field: "departamento", headerName: "Dpto.", width: 120 },
+            {
+                field: "acciones",
+                headerName: "Acciones",
+                width: 150,
+                sortable: false,
+                filterable: false,
+                renderCell: ({ row }) => {
+                    const isEditing = editingRowId === row.registro_ppu;
 
-                                        /* —— cabeceras —— */
-                                        '& .MuiDataGrid-columnHeader': {
-                                            whiteSpace: 'normal',
-                                            lineHeight: '1.2rem',
-                                            padding: '6px 8px',
-                                            borderRight: '1px solid #d0d0d0',  // línea vertical en encabezados
-                                        },
+                    return (
+                        <Box sx={{ display: "flex", gap: 1 }}>
+                            <Button
+                                size="small"
+                                variant="contained"
+                                onClick={() => (isEditing ? handleSaveClick() : handleEditClick(row))}
+                                sx={{
+                                    textTransform: "none",
+                                    fontWeight: 900,
+                                    borderRadius: 1.7,
+                                    backgroundColor: PENAL.red,
+                                    boxShadow: "0 8px 18px rgba(0,0,0,0.18)",
+                                    "&:hover": { backgroundColor: PENAL.redH },
+                                    "&:active": { backgroundColor: PENAL.redA },
+                                }}
+                            >
+                                {isEditing ? "Guardar" : "Modificar"}
+                            </Button>
+                        </Box>
+                    );
+                },
+            },
+        ],
+        [editingRowId, handleSaveClick, handleEditClick, renderSituacionConHistorial]
+    );
 
-                                        /* —— quita la línea derecha en la última columna —— */
-                                        '& .MuiDataGrid-columnHeader:last-of-type, & .MuiDataGrid-cell:last-of-type': {
-                                            borderRight: 'none',
-                                        },
+    const columns = useMemo(() => {
+        return fullColumns.map((col) => {
+            if (col.field === "acciones") return col;
+            if (col.field === "e_situacional") return col;
+            return { ...col, renderCell: renderEditable };
+        });
+    }, [fullColumns, renderEditable]);
 
-                                        /* —— filas-año —— */
-                                        '& .year-row .MuiDataGrid-cell': {
-                                            fontWeight: 'bold',
-                                            backgroundColor: '#e0e0e0',
-                                            borderBottom: '1px solid #bdbdbd',
+    const localeES = useMemo(
+        () => ({
+            ...esES.components.MuiDataGrid.defaultProps.localeText,
+            noRowsLabel: "Sin filas",
+            noResultsOverlayLabel: "Sin resultados",
+            footerPaginationRowsPerPage: "Filas por página:",
+        }),
+        []
+    );
+
+    const isArchivado = (row) => {
+        const etiqueta = String(row?.etiqueta || "").trim().toUpperCase();
+        return etiqueta.startsWith("ARCHI");
+    };
+
+    const getRowClassName = (params) => {
+        const parity = params.indexRelativeToCurrentPage % 2 === 0 ? "row-even" : "row-odd";
+        const archivo = isArchivado(params.row) ? "row-archivo" : "";
+        return `${parity} ${archivo}`.trim();
+    };
+
+    const limpiarFiltros = () => {
+        const { from, to } = getRangoAnual();
+
+        setQuery("");
+        setQueryApplied("");
+        if (debouncedApplyQuery?.cancel) debouncedApplyQuery.cancel();
+
+        setFiltroTipo("ALL");
+        setSelectedAbogado("");
+        setMostrarArchivados(true);
+
+        setFromManualOverride(true);
+        setFromUI(from);
+        setToUI(to);
+        setDateError("");
+        setFromApplied(from);
+        setToApplied(to);
+
+        buscarCacheRef.current?.clear?.();
+        pulseGrid();
+    };
+
+    const sxOutlinedHdr = {
+        minHeight: 36,
+        color: "#fff",
+        borderColor: PENAL.controlBorder,
+        backgroundColor: PENAL.controlBg,
+        textTransform: "none",
+        "&:hover": { borderColor: PENAL.controlBorderH, backgroundColor: PENAL.controlBgH },
+    };
+
+    const sxTextFieldHdr = {
+        flex: "1 1 320px",
+        maxWidth: 540,
+        minWidth: { xs: "100%", sm: 260, md: 320 },
+        "& .MuiInputBase-input": { color: "#fff" },
+        "& .MuiInputBase-input::placeholder": { color: PENAL.controlPlaceholder, opacity: 1 },
+        "& .MuiInputLabel-root": { color: PENAL.controlLabel },
+        "& .MuiOutlinedInput-notchedOutline": { borderColor: PENAL.controlBorder },
+        "& .MuiOutlinedInput-root": { backgroundColor: PENAL.controlBg, borderRadius: 2 },
+        "&:hover .MuiOutlinedInput-notchedOutline": { borderColor: PENAL.controlBorderH },
+        "&:hover .MuiOutlinedInput-root": { backgroundColor: PENAL.controlBgH },
+        "& .MuiOutlinedInput-root.Mui-focused .MuiOutlinedInput-notchedOutline": { borderColor: PENAL.controlBorderH },
+    };
+
+    const sxDateFieldHdr = {
+        flex: "0 1 170px",
+        minWidth: { xs: "48%", sm: 165 },
+        "& .MuiInputBase-input": { color: "#fff" },
+        "& .MuiInputLabel-root": { color: PENAL.controlLabel },
+        "& .MuiOutlinedInput-notchedOutline": { borderColor: PENAL.controlBorder },
+        "& .MuiOutlinedInput-root": { backgroundColor: PENAL.controlBg, borderRadius: 2 },
+        "&:hover .MuiOutlinedInput-notchedOutline": { borderColor: PENAL.controlBorderH },
+        "&:hover .MuiOutlinedInput-root": { backgroundColor: PENAL.controlBgH },
+        "& .MuiOutlinedInput-root.Mui-focused .MuiOutlinedInput-notchedOutline": { borderColor: PENAL.controlBorderH },
+    };
+
+    const sxSelectHdr = {
+        flex: "0 1 160px",
+        minWidth: { xs: "48%", sm: 150 },
+        "& .MuiInputBase-root": { color: "#fff", backgroundColor: PENAL.controlBg, borderRadius: 2 },
+        "& .MuiInputLabel-root": { color: PENAL.controlLabel },
+        "& .MuiOutlinedInput-notchedOutline": { borderColor: PENAL.controlBorder },
+        "&:hover .MuiOutlinedInput-notchedOutline": { borderColor: PENAL.controlBorderH },
+        "&:hover .MuiInputBase-root": { backgroundColor: PENAL.controlBgH },
+        "& .MuiSvgIcon-root": { color: "rgba(255,255,255,0.90)" },
+    };
+
+    const sxLawyerFilterWrap = {
+        flex: "1 1 260px",
+        minWidth: { xs: "100%", sm: 260 },
+        maxWidth: 420,
+        "& .MuiFormControl-root": { width: "100%" },
+        "& .MuiInputLabel-root": { color: PENAL.controlLabel },
+        "& .MuiInputBase-root": { color: "#fff", backgroundColor: PENAL.controlBg, borderRadius: 2 },
+        "& .MuiOutlinedInput-notchedOutline": { borderColor: PENAL.controlBorder },
+        "&:hover .MuiOutlinedInput-notchedOutline": { borderColor: PENAL.controlBorderH },
+        "&:hover .MuiInputBase-root": { backgroundColor: PENAL.controlBgH },
+        "& .MuiSvgIcon-root": { color: "rgba(255,255,255,0.90)" },
+        "& input": { color: "#fff" },
+        "& input::placeholder": { color: PENAL.controlPlaceholder, opacity: 1 },
+        "& .MuiAutocomplete-input": { color: "#fff" },
+        "& .MuiAutocomplete-popupIndicator": { color: "rgba(255,255,255,0.90)" },
+        "& .MuiAutocomplete-clearIndicator": { color: "rgba(255,255,255,0.90)" },
+    };
+
+    const totalHist = Array.isArray(historyDetail) ? historyDetail.length : 0;
+    const totalHistPdf = (Array.isArray(historyDetail) ? historyDetail : []).filter((h) =>
+        String(h?.ruta || "").trim()
+    ).length;
+
+    return (
+        <Box
+            className="data-penal"
+            sx={{
+                width: "100%",
+                maxWidth: "100%",
+                m: 0,
+                p: 0,
+                boxSizing: "border-box",
+                backgroundColor: "#fff",
+                height: "100vh",
+                overflow: "hidden",
+                display: "flex",
+                flexDirection: "column",
+                minHeight: 0,
+            }}
+        >
+            {tab === 0 && (
+                <>
+                    <Box
+                        sx={{
+                            width: "100%",
+                            background: PENAL.headerBg,
+                            color: PENAL.textOnHdr,
+                            p: 2,
+                            borderTopLeftRadius: 12,
+                            borderTopRightRadius: 12,
+                            border: `1px solid ${PENAL.headerEdge}`,
+                            borderBottom: "none",
+                            display: "flex",
+                            flexDirection: "column",
+                            gap: 1.25,
+                            boxShadow: "0 12px 34px rgba(0,0,0,0.28)",
+                            boxSizing: "border-box",
+                            flex: "0 0 auto",
+                        }}
+                    >
+                        <Typography
+                            variant="h5"
+                            align="center"
+                            sx={{ fontWeight: 950, letterSpacing: 0.8, textTransform: "uppercase" }}
+                        >
+                            Seguimiento de Procesos Penales PPU
+                        </Typography>
+
+                        <Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
+                            <Box
+                                sx={{
+                                    display: "flex",
+                                    flexWrap: "wrap",
+                                    justifyContent: "center",
+                                    alignItems: "center",
+                                    gap: 1,
+                                    width: "100%",
+                                }}
+                            >
+                                <Box
+                                    sx={{
+                                        display: "flex",
+                                        alignItems: "center",
+                                        "& .MuiButton-root": {
+                                            minHeight: 36,
+                                            textTransform: "none",
+                                            fontWeight: 800,
+                                            borderRadius: 1.8,
                                         },
-                                        '& .year-row .MuiDataGrid-cell:not(:first-of-type)': {
-                                            visibility: 'hidden',
-                                        },
-                                        /* —— resaltado de fila cuando etiqueta === "Archivo" —— */
-                                        '& .row-archivo .MuiDataGrid-cell': {
-                                            backgroundColor: '#ffebee',
-                                            color: '#b71c1c',
-                                        },
+                                    }}
+                                >
+                                    <Ingresos onRefresh={() => buscarDatos(1, queryApplied)} query={queryApplied} />
+                                </Box>
+
+                                <Button
+                                    size="small"
+                                    variant="outlined"
+                                    onClick={() => {
+                                        setSelectedRegistroPPU("");
+                                        setBusquedaRapidaRegistroPPU("");
+                                        setOpenBusquedaRapida(true);
+                                    }}
+                                    sx={{ ...sxOutlinedHdr, minWidth: 230, fontWeight: 900, borderRadius: 1.9 }}
+                                >
+                                    Edición rápida – recepción directa
+                                </Button>
+
+                                <TextField
+                                    label="Búsqueda global"
+                                    placeholder="PPU, denunciado, fiscalía, juzgado…"
+                                    value={query}
+                                    onChange={handleQueryChange}
+                                    size="small"
+                                    sx={sxTextFieldHdr}
+                                />
+
+                                <TextField
+                                    label="Desde"
+                                    type="date"
+                                    value={fromUI}
+                                    onChange={handleFromChange}
+                                    size="small"
+                                    InputLabelProps={{ shrink: true }}
+                                    sx={sxDateFieldHdr}
+                                />
+
+                                <TextField
+                                    label="Hasta"
+                                    type="date"
+                                    value={toUI}
+                                    onChange={handleToChange}
+                                    size="small"
+                                    InputLabelProps={{ shrink: true }}
+                                    sx={sxDateFieldHdr}
+                                />
+
+                                {dateError ? (
+                                    <Typography
+                                        sx={{
+                                            flexBasis: "100%",
+                                            textAlign: "center",
+                                            fontSize: 12,
+                                            color: "rgba(255,226,226,0.95)",
+                                            mt: 0.25,
+                                        }}
+                                    >
+                                        {dateError}
+                                    </Typography>
+                                ) : null}
+                            </Box>
+
+                            <Box
+                                sx={{
+                                    display: "flex",
+                                    flexWrap: "wrap",
+                                    justifyContent: "center",
+                                    alignItems: "center",
+                                    gap: 1,
+                                    width: "100%",
+                                }}
+                            >
+                                <FormControl size="small" sx={sxSelectHdr}>
+                                    <InputLabel id="filtro-tipo-label">Tipo</InputLabel>
+                                    <Select
+                                        labelId="filtro-tipo-label"
+                                        value={filtroTipo}
+                                        label="Tipo"
+                                        onChange={(e) => setFiltroTipo(e.target.value)}
+                                    >
+                                        <MenuItem value="ALL">Todos</MenuItem>
+                                        <MenuItem value="DENUNCIA">Denuncias</MenuItem>
+                                        <MenuItem value="LEGAJO">Legajos</MenuItem>
+                                    </Select>
+                                </FormControl>
+
+                                <Box sx={sxLawyerFilterWrap}>
+                                    {role === "admin" ? (
+                                        <LawyerFilter
+                                            role={role}
+                                            username={username}
+                                            selectedAbogadoPlazos={selectedAbogado}
+                                            setSelectedAbogadoPlazos={setSelectedAbogado}
+                                            debouncedBuscarPlazosData={buscarDatos}
+                                            queryPlazos={queryApplied}
+                                            mostrarArchivadosPlazos={mostrarArchivados}
+                                            setPagePlazos={() => { }}
+                                        />
+                                    ) : (
+                                        <Typography
+                                            variant="body2"
+                                            sx={{ fontStyle: "italic", color: "#fff", opacity: 0.92 }}
+                                        >
+                                            Abogado: {String(username || "").toUpperCase()} (filtro forzado)
+                                        </Typography>
+                                    )}
+                                </Box>
+
+                                <FormControlLabel
+                                    control={
+                                        <Checkbox
+                                            checked={mostrarArchivados}
+                                            onChange={(e) => setMostrarArchivados(e.target.checked)}
+                                            sx={{
+                                                color: "rgba(255,255,255,0.85)",
+                                                "&.Mui-checked": { color: PENAL.success },
+                                            }}
+                                        />
+                                    }
+                                    label="Mostrar archivados"
+                                    sx={{
+                                        color: "#fff",
+                                        "& .MuiFormControlLabel-label": { fontWeight: 850, opacity: 0.96 },
                                     }}
                                 />
 
+                                <Button
+                                    size="small"
+                                    variant="outlined"
+                                    onClick={limpiarFiltros}
+                                    sx={{ ...sxOutlinedHdr, minWidth: 150, fontWeight: 900, borderRadius: 1.9 }}
+                                >
+                                    Limpiar filtros
+                                </Button>
+
+                                <ExportExcelButton
+                                    role={role}
+                                    apiBaseUrl={API_BASE_URL}
+                                    buildBuscarParams={buildBuscarParams}
+                                    query={queryApplied}
+                                    fromApplied={fromApplied}
+                                    toApplied={toApplied}
+                                    datosFiltrados={datosFiltrados}
+                                    fullColumns={fullColumns}
+                                    sx={{
+                                        backgroundColor: PENAL.excel,
+                                        color: "#fff",
+                                        "&:hover": { backgroundColor: PENAL.excelH },
+                                        "&:active": { backgroundColor: PENAL.excelA },
+                                    }}
+                                />
+
+                                <Box
+                                    sx={{
+                                        px: 1.25,
+                                        py: 0.7,
+                                        borderRadius: 999,
+                                        border: `1px solid ${PENAL.controlBorder}`,
+                                        backgroundColor: "rgba(0,0,0,0.18)",
+                                        color: "#fff",
+                                        fontSize: 12,
+                                        fontWeight: 900,
+                                        whiteSpace: "nowrap",
+                                    }}
+                                >
+                                    Total: {totalVisible}
+                                    {isLoading ? " · Actualizando…" : ""}
+                                </Box>
+                            </Box>
+                        </Box>
+                    </Box>
+
+                    <Box
+                        sx={{
+                            width: "100%",
+                            border: `1px solid ${PENAL.outline}`,
+                            borderTop: "none",
+                            borderBottomLeftRadius: 12,
+                            borderBottomRightRadius: 12,
+                            bgcolor: "#fff",
+                            flex: "1 1 auto",
+                            minHeight: 0,
+                            overflow: "hidden",
+                            boxShadow: "0 10px 24px rgba(0,0,0,0.10)",
+                            boxSizing: "border-box",
+                        }}
+                    >
+                        <DataGrid
+                            rows={datosFiltrados}
+                            columns={columns}
+                            localeText={localeES}
+                            getRowId={(r) => r.id}
+                            disableRowSelectionOnClick
+                            loading={isLoading}
+                            pagination
+                            paginationModel={paginationModel}
+                            onPaginationModelChange={handlePaginationModelChange}
+                            pageSizeOptions={[FIXED_PAGE_SIZE]}
+                            getRowClassName={getRowClassName}
+                            getRowHeight={() => "auto"}
+                            onRowDoubleClick={handleGridRowDoubleClick}
+                            sx={{
+                                height: "100%",
+                                border: "none",
+                                fontSize: "0.78rem",
+                                transition: "opacity 220ms ease, transform 220ms ease, box-shadow 220ms ease",
+                                opacity: isLoading ? 0.78 : gridPulse ? 0.92 : 1,
+                                transform: isLoading ? "translateY(2px)" : "translateY(0px)",
+                                boxShadow: gridPulse
+                                    ? "inset 0 0 0 3px rgba(185,28,28,0.18), inset 0 0 0 1px rgba(17,24,39,0.08)"
+                                    : "none",
+
+                                "& .MuiDataGrid-columnHeaders": {
+                                    background: PENAL.keyHeaderBg,
+                                    borderBottom: `1px solid ${PENAL.keyHeaderBorder}`,
+                                },
+                                "& .MuiDataGrid-columnHeader": {
+                                    background: PENAL.keyHeaderBg,
+                                    color: PENAL.keyHeaderText,
+                                    borderRight: `1px solid ${PENAL.keyHeaderBorder}`,
+                                    borderBottom: `1px solid ${PENAL.keyHeaderBorder}`,
+                                    whiteSpace: "normal",
+                                    lineHeight: "1.1rem",
+                                    padding: "10px 10px",
+                                },
+                                "& .MuiDataGrid-columnHeaderTitle": {
+                                    fontWeight: 950,
+                                    letterSpacing: 0.6,
+                                    textTransform: "uppercase",
+                                    whiteSpace: "normal",
+                                    lineHeight: "1.1rem",
+                                },
+                                "& .MuiDataGrid-columnHeader .MuiSvgIcon-root": {
+                                    color: "rgba(255,255,255,0.92)",
+                                },
+                                "& .MuiDataGrid-columnHeader .MuiDataGrid-menuIcon button": {
+                                    color: "rgba(255,255,255,0.92)",
+                                },
+                                "& .MuiDataGrid-iconSeparator": { color: "rgba(255,255,255,0.35)" },
+                                "& .MuiDataGrid-columnSeparator": { color: "rgba(255,255,255,0.35)" },
+
+                                "& .MuiDataGrid-cell": {
+                                    whiteSpace: "normal !important",
+                                    wordBreak: "break-word",
+                                    lineHeight: "1.25rem",
+                                    padding: "8px 10px",
+                                    alignItems: "flex-start",
+                                    borderRight: `1px solid ${PENAL.gridCellBorder}`,
+                                    borderBottom: `1px solid ${PENAL.gridCellBorder}`,
+                                    color: "#111827",
+                                },
+
+                                "& .MuiDataGrid-columnHeader:last-of-type, & .MuiDataGrid-cell:last-of-type": {
+                                    borderRight: "none",
+                                },
+
+                                "& .MuiDataGrid-virtualScroller": { backgroundColor: PENAL.rowEvenBg },
+                                "& .MuiDataGrid-virtualScrollerContent": { backgroundColor: PENAL.rowEvenBg },
+
+                                "& .row-even:not(.row-archivo) .MuiDataGrid-cell": { backgroundColor: PENAL.rowEvenBg },
+                                "& .row-odd:not(.row-archivo) .MuiDataGrid-cell": { backgroundColor: PENAL.rowOddBg },
+
+                                "& .MuiDataGrid-row:hover:not(.row-archivo) .MuiDataGrid-cell": {
+                                    backgroundColor: PENAL.rowHoverBg,
+                                },
+
+                                "& .row-even:not(.row-archivo) .MuiDataGrid-cell.cell-key": {
+                                    backgroundColor: PENAL.keyCellBgEven,
+                                    color: PENAL.keyCellText,
+                                },
+                                "& .row-odd:not(.row-archivo) .MuiDataGrid-cell.cell-key": {
+                                    backgroundColor: PENAL.keyCellBgOdd,
+                                    color: PENAL.keyCellText,
+                                },
+                                "& .MuiDataGrid-row:hover:not(.row-archivo) .MuiDataGrid-cell.cell-key": {
+                                    backgroundColor: "rgba(107, 15, 26, 0.085)",
+                                },
+
+                                "& .row-archivo .MuiDataGrid-cell": {
+                                    backgroundColor: PENAL.archivedRowBg,
+                                    color: PENAL.archivedRowText,
+                                    borderRight: "1px solid rgba(255,255,255,0.10)",
+                                    borderBottom: "1px solid rgba(255,255,255,0.12)",
+                                },
+                                "& .row-archivo .MuiDataGrid-cell .MuiTypography-root": {
+                                    color: PENAL.archivedRowText,
+                                },
+                                "& .MuiDataGrid-row.row-archivo:hover .MuiDataGrid-cell": {
+                                    backgroundColor: PENAL.archivedRowBgHover,
+                                },
+
+                                "& .MuiDataGrid-footerContainer": {
+                                    borderTop: `1px solid ${PENAL.gridCellBorderStrong}`,
+                                    backgroundColor: "#FFFFFF",
+                                },
+
+                                "& .MuiTablePagination-selectLabel, & .MuiTablePagination-input": { display: "none" },
+                                "& .MuiTablePagination-actions": { marginLeft: "auto" },
+                            }}
+                        />
+                    </Box>
+
+                    <BusquedaRapida
+                        key={`br-${openBusquedaRapida ? "open" : "closed"}-${busquedaRapidaRegistroPPU || "new"}`}
+                        open={openBusquedaRapida}
+                        onClose={handleCloseBusquedaRapida}
+                        registro_ppu={busquedaRapidaRegistroPPU}
+                    />
+
+                    <Dialog open={openHistorial} onClose={closeHistorial} fullWidth maxWidth="lg">
+                        <DialogTitle
+                            sx={{
+                                background: PENAL.keyHeaderBg,
+                                color: "#fff",
+                                borderBottom: `1px solid ${PENAL.keyHeaderBorder}`,
+                                fontWeight: 950,
+                                letterSpacing: 0.6,
+                                textTransform: "uppercase",
+                                py: 1.35,
+                                display: "flex",
+                                alignItems: "center",
+                                justifyContent: "space-between",
+                                gap: 1,
+                            }}
+                        >
+                            <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+                                <HistoryRoundedIcon />
+                                <Box>
+                                    <Box sx={{ lineHeight: "1.15rem" }}>Historial — Situación</Box>
+                                    <Box sx={{ fontSize: 12, opacity: 0.9, fontWeight: 800, textTransform: "none" }}>
+                                        PPU: {selectedRegistroPPU || "-"}
+                                    </Box>
+                                </Box>
                             </Box>
 
+                            <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+                                <Chip
+                                    size="small"
+                                    label={`Versiones: ${historyLoading ? "…" : totalHist}`}
+                                    sx={{
+                                        fontWeight: 900,
+                                        borderRadius: 999,
+                                        backgroundColor: "rgba(255,255,255,0.16)",
+                                        color: "#fff",
+                                        border: "1px solid rgba(255,255,255,0.20)",
+                                    }}
+                                />
+                                <Chip
+                                    size="small"
+                                    icon={<PictureAsPdfRoundedIcon sx={{ color: "#fff !important" }} />}
+                                    label={`PDF: ${historyLoading ? "…" : totalHistPdf}`}
+                                    sx={{
+                                        fontWeight: 900,
+                                        borderRadius: 999,
+                                        backgroundColor: "rgba(255,255,255,0.16)",
+                                        color: "#fff",
+                                        border: "1px solid rgba(255,255,255,0.20)",
+                                    }}
+                                />
+                            </Box>
+                        </DialogTitle>
 
-                           
+                        <DialogContent dividers sx={{ p: 2, bgcolor: "#fff" }}>
+                            {historyLoading ? (
+                                <Box sx={{ mb: 1.5 }}>
+                                    <LinearProgress />
+                                    <Typography sx={{ mt: 1, fontSize: 12, opacity: 0.8 }}>
+                                        Cargando historial…
+                                    </Typography>
+                                </Box>
+                            ) : null}
 
-                            {/* —————————————— */}
+                            {historyError ? (
+                                <Typography sx={{ color: "#B91C1C", fontWeight: 900, fontSize: 13, mb: 1.25 }}>
+                                    {historyError}
+                                </Typography>
+                            ) : null}
 
-                        </>
-                    )}
+                            {!historyLoading && !historyError && (!historyDetail || historyDetail.length === 0) ? (
+                                <Typography sx={{ fontSize: 12.5, opacity: 0.85 }}>
+                                    No hay versiones registradas para SITUACIÓN en este PPU.
+                                </Typography>
+                            ) : null}
+
+                            {!historyLoading && !historyError && historyDetail && historyDetail.length > 0 ? (
+                                <TableContainer
+                                    component={Paper}
+                                    elevation={0}
+                                    sx={{
+                                        border: "1px solid #E5E7EB",
+                                        borderRadius: 2,
+                                        overflow: "hidden",
+                                    }}
+                                >
+                                    <Table size="small" stickyHeader>
+                                        <TableHead>
+                                            <TableRow>
+                                                <TableCell sx={{ fontWeight: 950, width: 70, backgroundColor: "#F9FAFB" }}>#</TableCell>
+                                                <TableCell sx={{ fontWeight: 950, width: 170, backgroundColor: "#F9FAFB" }}>Fecha</TableCell>
+                                                <TableCell sx={{ fontWeight: 950, width: 220, backgroundColor: "#F9FAFB" }}>Usuario</TableCell>
+                                                <TableCell sx={{ fontWeight: 950, backgroundColor: "#F9FAFB" }}>Valor anterior</TableCell>
+                                                <TableCell sx={{ fontWeight: 950, width: 170, backgroundColor: "#F9FAFB" }} align="right">
+                                                    PDF
+                                                </TableCell>
+                                            </TableRow>
+                                        </TableHead>
+
+                                        <TableBody>
+                                            {historyDetail.map((h, idx) => {
+                                                const ruta = String(h?.ruta || "").trim();
+                                                const fecha = String(h?.fecha_version || "").trim();
+                                                const usuario = String(h?.usuario_modificacion || "").trim();
+                                                const valor = String(h?.old_value ?? "").trim();
+                                                const hasPdf = !!ruta;
+
+                                                return (
+                                                    <TableRow
+                                                        key={`${h?.version_id ?? "v"}-${idx}`}
+                                                        hover
+                                                        sx={{
+                                                            "&:nth-of-type(odd) td": { backgroundColor: "#FFFFFF" },
+                                                            "&:nth-of-type(even) td": { backgroundColor: "#FAFAFA" },
+                                                        }}
+                                                    >
+                                                        <TableCell sx={{ fontWeight: 950 }}>{idx + 1}</TableCell>
+                                                        <TableCell sx={{ fontSize: 12 }}>{fecha || "—"}</TableCell>
+                                                        <TableCell sx={{ fontSize: 12 }}>
+                                                            <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+                                                                <Box sx={{ fontWeight: 800 }}>{usuario || "—"}</Box>
+                                                                <Chip
+                                                                    size="small"
+                                                                    label={hasPdf ? "PDF" : "Sin PDF"}
+                                                                    sx={{
+                                                                        height: 22,
+                                                                        fontWeight: 900,
+                                                                        borderRadius: 999,
+                                                                        backgroundColor: hasPdf ? "rgba(22,163,74,0.12)" : "#F3F4F6",
+                                                                        color: hasPdf ? "#166534" : "rgba(17,24,39,0.55)",
+                                                                        border: `1px solid ${hasPdf ? "rgba(22,163,74,0.25)" : "#E5E7EB"}`,
+                                                                    }}
+                                                                />
+                                                            </Box>
+                                                        </TableCell>
+                                                        <TableCell sx={{ fontSize: 12, whiteSpace: "pre-wrap" }}>
+                                                            {valor || "—"}
+                                                        </TableCell>
+                                                        <TableCell align="right">
+                                                            <Tooltip title={hasPdf ? "Abrir PDF" : "No hay PDF en esta versión"} arrow>
+                                                                <span>
+                                                                    <Button
+                                                                        size="small"
+                                                                        variant="outlined"
+                                                                        disabled={!hasPdf}
+                                                                        startIcon={<PictureAsPdfRoundedIcon fontSize="small" />}
+                                                                        onClick={() => openPdfByRuta(ruta)}
+                                                                        sx={{
+                                                                            textTransform: "none",
+                                                                            fontWeight: 950,
+                                                                            borderRadius: 1.7,
+                                                                            borderColor: "#D1D5DB",
+                                                                            color: "#111827",
+                                                                            backgroundColor: "rgba(255,255,255,0.92)",
+                                                                            "&:hover": {
+                                                                                borderColor: "#9CA3AF",
+                                                                                backgroundColor: "#F9FAFB",
+                                                                            },
+                                                                            "&.Mui-disabled": {
+                                                                                color: "rgba(17,24,39,0.45)",
+                                                                                borderColor: "#E5E7EB",
+                                                                                backgroundColor: "#F3F4F6",
+                                                                            },
+                                                                        }}
+                                                                    >
+                                                                        Abrir
+                                                                    </Button>
+                                                                </span>
+                                                            </Tooltip>
+                                                        </TableCell>
+                                                    </TableRow>
+                                                );
+                                            })}
+                                        </TableBody>
+                                    </Table>
+                                </TableContainer>
+                            ) : null}
+                        </DialogContent>
+
+                        <DialogActions
+                            sx={{
+                                px: 2,
+                                py: 1.25,
+                                bgcolor: "#fff",
+                                borderTop: "1px solid #E5E7EB",
+                            }}
+                        >
+                            <Button
+                                onClick={closeHistorial}
+                                variant="outlined"
+                                sx={{
+                                    textTransform: "none",
+                                    fontWeight: 950,
+                                    borderRadius: 1.8,
+                                    borderColor: "#D1D5DB",
+                                    color: "#111827",
+                                    backgroundColor: "#fff",
+                                    "&:hover": { borderColor: "#9CA3AF", backgroundColor: "#F9FAFB" },
+                                }}
+                            >
+                                Cerrar
+                            </Button>
+                        </DialogActions>
+                    </Dialog>
+
+                    <Box sx={{ display: "none" }}>
+                        <Button onClick={onClickExport}>Export</Button>
+                    </Box>
                 </>
             )}
-        </>
+        </Box>
     );
 };
 

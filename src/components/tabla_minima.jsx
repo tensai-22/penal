@@ -876,7 +876,7 @@ function TablaMinima() {
 
                 try {
                     // 1.b) Llamada al backend para buscar datos
-                    const resp = await axios.get(`${API_BASE_URL}/api/buscar`, {
+                    const resp = await axios.get(`${API_BASE_URL}/api/buscar_global`, {
                         params: {
                             query: ppuExtracted,
                             limit: 1,
@@ -885,7 +885,7 @@ function TablaMinima() {
                         },
                     });
                     console.log(
-                        `[fetchAll] [${fileName}] Respuesta de /api/buscar:`,
+                        `[fetchAll] [${fileName}] Respuesta de /api/buscar_global:`,
                         resp.data
                     );
 

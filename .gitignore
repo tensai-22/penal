@@ -31,3 +31,5 @@ pdfs/
 storage/
 uploads/
 tmp/
+*.pdf
+**/*.pdf

@@ -14,6 +14,7 @@ from datetime import date
 from dateutil import parser
 import shutil
 from flask import send_from_directory
+from io import BytesIO
 
 # ---------------------------
 # CONFIGURACIÓN DE LOGGING
@@ -70,10 +71,22 @@ CORS(
 )
 
 
-#blueprints
+# blueprints
 
+# app.py (o donde creas la app)
 from backend.modules.ingresos.ingresos import ingresos_bp
-app.register_blueprint(ingresos_bp, url_prefix="/api")
+from backend.modules.scan_busqueda.scan import scan_bp
+from backend.modules.data_penal.data_penal import datapenal_bp
+from backend.modules.busqueda_rapida.busqueda_rapida import busqueda_rapida_bp
+from backend.modules.history.history import history_bp  # <-- nuevo
+
+app.register_blueprint(ingresos_bp,        url_prefix="/api")
+app.register_blueprint(scan_bp,            url_prefix="/api")
+app.register_blueprint(datapenal_bp,       url_prefix="/api")
+app.register_blueprint(busqueda_rapida_bp, url_prefix="/api")
+app.register_blueprint(history_bp,         url_prefix="/api")  # <-- nuevo
+
+
 
 from backend.core import (
     # Auth/decorators
@@ -179,7 +192,9 @@ users = {
 }
 
 
-
+# ✅ DESPUÉS de crear app = Flask(__name__)
+app.config["USERNAME_TO_ABOGADO"] = username_to_abogado
+app.config["USERS"] = users
 
 
 ## fin de la busqueda avanzada
@@ -202,522 +217,9 @@ def logout():
     session.clear()
     return jsonify({"message": "Cierre de sesión exitoso"})
 
-@app.route('/api/years', methods=['GET'])
-@login_required
-def get_years():
-    """
-    Devuelve la lista de años únicos extraídos de registro_ppu,
-    ordenados de mayor a menor.
-    """
-    app.logger.debug("→ Entrando a /api/years")  # <--- LOG
 
-    connection = get_db_connection()
-    if connection is None:
-        app.logger.error("get_years: No se pudo conectar a la base de datos")
-        return jsonify({"error": "Error al conectar con la base de datos"}), 500
 
-    try:
-        cursor = connection.cursor(dictionary=True)
-        sql = """
-            SELECT DISTINCT
-              CAST(
-                SUBSTRING_INDEX(
-                  SUBSTRING_INDEX(registro_ppu, '-', 3),
-                  '-',
-                  -1
-                ) AS UNSIGNED
-              ) AS year
-            FROM datapenal
-            WHERE registro_ppu IS NOT NULL AND registro_ppu != ''
-            ORDER BY year DESC
-        """
-        app.logger.debug("get_years: Ejecutando SQL:\n%s", sql)  # <--- LOG
-        cursor.execute(sql)
-        rows = cursor.fetchall()
-        app.logger.debug("get_years: Filas obtenidas: %d", len(rows))  # <--- LOG
 
-        años = [str(r["year"]) for r in rows if r.get("year") is not None]
-        app.logger.debug("get_years: Lista de años resultante → %s", años)  # <--- LOG
-        return jsonify({"years": años})
-    except Exception as e:
-        app.logger.error("Error en /api/years: %s", e, exc_info=True)
-        return jsonify({"error": "Error al obtener años"}), 500
-    finally:
-        cursor.close()
-        connection.close()
-
-@app.route('/api/buscar', methods=['GET'])
-@login_required
-def buscar():
-    """
-    Búsqueda en `datapenal` con estos parámetros:
-
-      - query               -> texto libre (REGEXP) (buscador global)
-      - page, limit         -> paginación
-      - abogado             -> filtra por abogado (admin) o forzado para user
-      - mostrar_archivados  -> 'true' | 'false'
-      - year                -> filtrar registros de un año concreto
-      - tipo                -> 'DENUNCIA' | 'LEGAJO' | 'ALL'
-
-    Flujo:
-      1) Leo todos los parámetros.
-      2) Si no se envía ni `query` ni `year`, obtengo el año más alto de la tabla
-         (`MAX(CAST(SUBSTRING_INDEX(SUBSTRING_INDEX(registro_ppu,'-',3),'-',-1) AS UNSIGNED))`).
-      3) Construyo el WHERE con los filtros (abogado, mostrar_archivados, query o year+tipo).
-      4) Devuelvo la lista paginada *y* el campo "used_year" indicando el año que realmente usé.
-    """
-    # 1) Leer parámetros de la request
-    query              = request.args.get('query', '').strip()
-    page               = max(int(request.args.get('page', 1)), 1)
-    limit              = max(int(request.args.get('limit', 20)), 1)
-    offset             = (page - 1) * limit
-    mostrar_archivados = request.args.get('mostrar_archivados', 'true').lower() == 'true'
-    year_param         = request.args.get('year', '').strip()      # Si viene vacío, lo asignamos luego
-    tipo_param         = request.args.get('tipo', 'ALL').upper()    # 'DENUNCIA' | 'LEGAJO' | 'ALL'
-    abogado_param      = request.args.get('abogado', '').strip().upper()
-
-    app.logger.debug(
-        "→ Entrando a /api/buscar con params → "
-        "query: '%s', page: %d, limit: %d, mostrar_archivados: %s, year: '%s', tipo: '%s', abogado: '%s'",
-        query, page, limit, mostrar_archivados, year_param, tipo_param, abogado_param
-    )
-
-        # 2) Determinar filtro de abogado según rol
-    user_role    = session.get('role')
-    current_user = session.get('username', '')
-    if user_role == 'user':
-        abogado_filter = username_to_abogado.get(current_user, '').upper()
-    else:
-        # Si viene "A; B", tomamos sólo "B"; si no, usamos tal cual
-        raw = abogado_param
-        if ';' in raw:
-            abogado_filter = raw.split(';')[-1].strip().upper()
-        else:
-            abogado_filter = raw.upper()
-
-
-    app.logger.debug(
-        "   • Filtro de abogado determinado → '%s' (rol: %s, usuario: %s)",
-        abogado_filter, user_role, current_user
-    )
-
-    # 3) Conectar a la base de datos
-    connection = get_db_connection()
-    if connection is None:
-        app.logger.error("buscar: No se pudo conectar a la base de datos")
-        return jsonify({"error": "Error al conectar con la base de datos"}), 500
-
-    try:
-        cursor = connection.cursor(dictionary=True)
-
-        # 4) Si no hay query y no hay year, obtenemos el año más alto de registro_ppu
-        used_year = year_param  # Lo que finalmente usaremos como filtro de año
-        if not query and not year_param:
-            cursor.execute("""
-                SELECT
-                  MAX(
-                    CAST(
-                      SUBSTRING_INDEX(
-                        SUBSTRING_INDEX(registro_ppu, '-', 3),
-                        '-',
-                        -1
-                      ) AS UNSIGNED
-                    )
-                  ) AS maxyear
-                FROM datapenal
-                WHERE registro_ppu IS NOT NULL AND registro_ppu != ''
-            """)
-            result = cursor.fetchone()
-            maxyear = result.get('maxyear') if result else None
-            if maxyear:
-                used_year = str(maxyear)
-                app.logger.debug(
-                    "   • No se envió 'year' ni 'query': asigno año más alto → %s",
-                    used_year
-                )
-
-        # 5) Construir condiciones dinámicas
-        conditions = []
-        params     = []
-
-        # 5.1 · Excluir archivados si corresponde
-        if not mostrar_archivados:
-            conditions.append("(d.etiqueta IS NULL OR d.etiqueta != %s)")
-            params.append('ARCHIVO')
-
-         # 5.2 · Filtrar por abogado usando sólo la parte posterior a ';'
-        if abogado_filter:
-            # Extrae la parte tras el ';' (o toda la cadena si no hay ';'), la limpia y compara en mayúsculas
-            conditions.append(
-                "UPPER(TRIM(SUBSTRING_INDEX(d.abogado, ';', -1))) = %s"
-            )
-            params.append(abogado_filter)
-
-        # 5.3 · Si hay query (buscador global), ignoramos filtros de year/tipo
-        if query:
-            cols    = [
-                'abogado','denunciado','origen','delito','departamento',
-                'fiscalia','informe_juridico','item','e_situacional',
-                'registro_ppu','juzgado','etiqueta'
-            ]
-            regexp    = query_to_regexp(query)
-            sub_conds = [f"d.{c} REGEXP %s" for c in cols]
-            conditions.insert(0, "(" + " OR ".join(sub_conds) + ")")
-            params = [regexp] * len(cols) + params
-            app.logger.debug(
-                "   • Buscador global: query='%s' → aplicar REGEXP en columnas: %s",
-                query, cols
-            )
-
-        else:
-            # 5.4 · Cuando NO hay query, aplicamos un solo filtro REGEXP según tipo y año
-            # … dentro de la función buscar(), cuando no hay query:
-            if not query and used_year and used_year.isdigit():
-                if tipo_param == 'DENUNCIA':
-                    # 1) “D-<número>-<año>” o “D-<número>-<año>-<letra>”
-                    #    => [0-9]+ acepta cualquier cantidad de dígitos en el número, y (?:-[A-Z])? el sufijo opcional.
-                    pattern = rf"^D-[0-9]+-{re.escape(used_year)}(?:-[A-Z])?$"
-                    app.logger.debug("   • Filtro unificado: tipo='DENUNCIA', pattern = '%s'", pattern)
-
-                elif tipo_param == 'LEGAJO':
-                    # 2) “LEG-<número>-<año>” o “LEG-<número>-<año>-<letra>”
-                    #    ó “L. <número>-<año>” o “L. <número>-<año>-<letra>”
-                    pattern = rf"^(?:LEG-[0-9]+-{re.escape(used_year)}(?:-[A-Z])?|L\. ?[0-9]+-{re.escape(used_year)}(?:-[A-Z])?)$"
-                    app.logger.debug("   • Filtro unificado: tipo='LEGAJO', pattern = '%s'", pattern)
-
-                else:  # ALL
-                    # 3) Fusionamos los dos casos anteriores en una sola expresión:
-                    pattern = (
-                        rf"^(?:"
-                        # DENUNCIA: D-<número>-<año>[-<letra>]
-                        rf"D-[0-9]+-{re.escape(used_year)}(?:-[A-Z])?"
-                        rf"|"
-                        # LEG: LEG-<número>-<año>[-<letra>]
-                        rf"LEG-[0-9]+-{re.escape(used_year)}(?:-[A-Z])?"
-                        rf"|"
-                        # L.: L. <número>-<año>[-<letra>] (puede haber o no el punto y espacio)
-                        rf"L\.?\s?[0-9]+-{re.escape(used_year)}(?:-[A-Z])?"
-                        rf")$"
-                    )
-                    app.logger.debug("   • Filtro unificado: tipo='ALL', pattern = '%s'", pattern)
-
-                conditions.append("d.registro_ppu REGEXP %s")
-                params.append(pattern)
-
-
-
-        # 6) Componer cláusula WHERE
-        where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-        app.logger.debug("   • Cláusula WHERE generada → %s", where_clause)
-        app.logger.debug("   • Parámetros para WHERE → %s", params)
-
-        # 7) Ejecutar SELECT
-        sql = f"""
-            SELECT d.*
-            FROM   datapenal d
-            {where_clause}
-        """
-        app.logger.debug("   • Ejecutando SQL completo:\n%s", sql)
-        cursor.execute(sql, params)
-        rows = cursor.fetchall()
-
-        # Limpiar el campo 'abogado': si contiene ';', quedarnos solo con la parte final
-        for row in rows:
-            abogado = row.get('abogado') or ''
-            if ';' in abogado:
-                row['abogado'] = abogado.split(';')[-1].strip()
-        app.logger.debug("   • Número de filas obtenidas de la BD: %d", len(rows))
-
-           # 8) Ordenar en Python por año descendente, tipo y número de legajo/denuncia
-        def extraer_year(ppu: str) -> int:
-            m = re.search(r'-(\d{4})(?:-|$)', ppu or '')
-            return int(m.group(1)) if m else 0
-
-        def tipo_order(ppu: str) -> int:
-            if ppu.upper().startswith('D-'):
-                return 0
-            if re.match(r'^(L\. ?|LEG-)', ppu, re.IGNORECASE):
-                return 1
-            return 2
-
-        def extraer_numero(ppu: str) -> int:
-            """
-            Extrae la parte numérica que viene después de 'D-', 'LEG-' o 'L. ' y antes del siguiente guion.
-            Ejemplo: “L. 100-2024” → devuelve 100
-                     “D-2501-2018-A” → devuelve 2501
-            """
-            m = re.search(r'^(?:D-|LEG-?|L\.?\s?)(\d+)-', ppu or '', re.IGNORECASE)
-            return int(m.group(1)) if m else 0
-
-        def sort_key(r):
-            ppu = (r.get('registro_ppu') or '').upper()
-            y   = extraer_year(ppu)
-            t   = tipo_order(ppu)
-            n   = extraer_numero(ppu)
-            return (-y, t, n)   # <<< ahora usamos 'n' en lugar de 'ppu' para ordenar numéricamente
-
-        rows_sorted   = sorted(rows, key=sort_key)
-        total_records = len(rows_sorted)
-        total_pages   = (total_records + limit - 1) // limit
-        data_page     = rows_sorted[offset : offset + limit]
-
-        app.logger.debug(
-            "   • Total registros ordenados: %d, páginas: %d, offset: %d",
-            total_records, total_pages, offset
-        )
-
-        # 9) Reemplazar None por '' y devolver JSON
-        # 9) Limpiar el campo 'abogado' y luego reemplazar None por ''
-        for fila in data_page:
-            # si viene formato "X; Y", nos quedamos sólo con Y
-            abogado = fila.get('abogado', '') or ''
-            if ';' in abogado:
-                fila['abogado'] = abogado.split(';')[-1].strip().upper()
-
-            # luego, el resto de campos None → ""
-            for k, v in fila.items():
-                if v is None:
-                    fila[k] = ""
-
-
-        respuesta = {
-            "data"          : data_page,
-            "page"          : page,
-            "total_pages"   : total_pages,
-            "total_records" : total_records,
-            "used_year"     : used_year  # <-- Este es el año que el backend realmente aplicó
-        }
-        app.logger.debug(
-            "   • Respuesta JSON de /api/buscar → keys: %s",
-            respuesta.keys()
-        )
-        return jsonify(respuesta)
-
-    except Exception as e:
-        app.logger.error("Error en /api/buscar: %s", e, exc_info=True)
-        return jsonify({"error": "Error al realizar la búsqueda"}), 500
-
-    finally:
-        cursor.close()
-        connection.close()
-
-
-from io import BytesIO
-from datetime import datetime
-from collections import defaultdict
-import difflib
-import pandas as pd
-from flask import request, jsonify, session, make_response
-
-
-@app.route('/api/exportar_excel', methods=['GET'])
-@login_required
-def exportar_excel():
-    """
-    Exporta registros de datapenal a Excel con:
-      - Limpieza de 'abogado' (solo parte tras ';')
-      - Filtros (ppu rango, búsqueda global, filtro por abogado)
-      - Métricas por año y totales (solo del abogado filtrado o de todos si admin sin filtro)
-      - Formato avanzado: tablas de Excel, centrado, ancho fijo, filas prohibidas en rojo
-    """
-    # 1) Parámetros
-    ppu_inicio         = request.args.get('ppu_inicio', '').strip()
-    ppu_fin            = request.args.get('ppu_fin', '').strip()
-    query              = request.args.get('query', '').strip()
-    mostrar_archivados = request.args.get('mostrar_archivados','true').lower() == 'true'
-    tipo               = request.args.get('tipo', 'ALL').strip().upper()
-
-    # 2) Rol y filtro de abogado
-    user_role    = session.get('role')
-    current_user = session.get('username','')
-    if user_role == 'user':
-        abogado_filter = username_to_abogado.get(current_user,'').upper()
-    else:
-        abogado_filter = request.args.get('abogado','').strip().upper() or ''
-
-    # 3) Conexión
-    conn = get_db_connection()
-    if conn is None:
-        return jsonify({"error":"Error al conectar con la base de datos"}), 500
-
-    try:
-        cursor = conn.cursor(dictionary=True)
-
-        # 4) WHERE dinámico
-        conds, params = [], []
-        if not mostrar_archivados:
-            conds.append("(etiqueta IS NULL OR etiqueta<>%s)"); params.append('ARCHIVO')
-        if abogado_filter:
-            conds.append("UPPER(TRIM(SUBSTRING_INDEX(abogado,';',-1)))=%s"); params.append(abogado_filter)
-        if query:
-            cols = ['abogado','denunciado','origen','delito','departamento',
-                    'fiscalia','informe_juridico','item','e_situacional',
-                    'registro_ppu','juzgado','etiqueta']
-            rx = query_to_regexp(query)
-            sub = []
-            for c in cols:
-                sub.append(f"{c} REGEXP %s"); params.append(rx)
-            conds.append("("+ " OR ".join(sub)+")")
-        where = "WHERE " + " AND ".join(conds) if conds else ""
-
-        # 5) Fetch datos
-        cursor.execute(f"SELECT * FROM datapenal {where}", params)
-        rows = cursor.fetchall()
-
-        # 6) Orden inicial
-        rows.sort(key=lambda r: parse_ppu(r['registro_ppu']))
-
-        # 7) Filtrar por rango
-        start_t = parse_ppu(ppu_inicio) if ppu_inicio else (0,0,0,'')
-        end_t   = parse_ppu(ppu_fin)    if ppu_fin    else (999999,9999,9999,'ZZZZ')
-        y_min, y_max = start_t[1], end_t[1]
-        final = [
-            r for r in rows
-            if y_min <= parse_ppu(r['registro_ppu'])[1] <= y_max
-            and start_t <= parse_ppu(r['registro_ppu']) <= end_t
-        ]
-        # 7-bis) Filtrar por tipo (LEGAJO / DENUNCIA)
-        if tipo == 'LEGAJO':
-            # Excluimos todo lo que empiece por “D-”
-            final = [r for r in final
-                     if not r['registro_ppu'].upper().startswith('D-')]
-        elif tipo == 'DENUNCIA':
-            # Nos quedamos sólo con los que empiecen por “D-”
-            final = [r for r in final
-                     if r['registro_ppu'].upper().startswith('D-')]
-        # Si tipo == 'ALL' no tocamos nada
-
-        # 8) Limpiar abogado y marcar prohibidas
-        banned_kw = ["ACUM","ACUMULADO","SUSPENDIDO","ANULADO","DERIVADO", "DUPLICADO"]
-        for r in final:
-            ab = (r.get('abogado') or '').split(';')[-1].strip().upper()
-            r['abogado']    = ab
-            r['_prohibida'] = any(kw in ab for kw in banned_kw)
-
-        # 9) Agrupar por año
-        data_by_year = defaultdict(list)
-        for r in final:
-            yr = parse_ppu(r['registro_ppu'])[1]
-            data_by_year[yr].append(r)
-        years = sorted(data_by_year.keys(), reverse=True)
-
-        # 10) Calcular métricas
-        allowed = ["CUBA","AGUILAR","POLO","MAU","ASCURRA",
-                   "MARTINEZ","FLORES","PALACIOS","POMAR",
-                   "ROJAS","FRISANCHO","NAVARRO"]
-
-        # Si hay filtro de abogado, métricas solo de ese
-        if abogado_filter:
-            keys = [abogado_filter]
-        else:
-            keys = allowed + ["OTROS"]
-
-        counts = {
-            key: {str(y):0 for y in years} | {"Total":0}
-            for key in keys
-        }
-
-        for r in final:
-            if r['_prohibida']:
-                continue
-            ab = r['abogado']
-            if abogado_filter and ab != abogado_filter:
-                continue
-            key = ab if abogado_filter else (difflib.get_close_matches(ab, allowed, n=1, cutoff=0.8) or ["OTROS"])[0]
-            yr  = str(parse_ppu(r['registro_ppu'])[1])
-            counts.setdefault(key, {str(y):0 for y in years}|{"Total":0})
-            counts[key][yr]      += 1
-            counts[key]["Total"] += 1
-
-        metrics = []
-        for key in keys:
-            c = counts.get(key, {str(y):0 for y in years}|{"Total":0})
-            row = {"Abogado": key}
-            for y in years:
-                row[str(y)] = c[str(y)]
-            row["Total"] = c["Total"]
-            metrics.append(row)
-
-        # 11) Crear Excel
-        output = BytesIO()
-        fecha_cod = datetime.now().strftime("%d-%m-%Y %Hh%Mm")
-        display = abogado_filter or "GENERAL"
-        # Nombre de archivo dinámico
-        filename = f"Base de datos del año {years[0] if years else ''} - {display} a la fecha de {fecha_cod}.xlsx"
-
-        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-            wb        = writer.book
-            title_fmt = wb.add_format({'align':'center','valign':'vcenter','bold':True,'font_size':14})
-            hdr_fmt   = wb.add_format({'align':'center','valign':'vcenter','bold':True})
-            cell_fmt  = wb.add_format({'align':'center','valign':'vcenter','text_wrap':False})
-            red_fmt   = wb.add_format({'bg_color':'#FFC7CE','font_color':'#9C0006'})
-
-            # Hoja Métricas
-            dfm = pd.DataFrame(metrics)
-            dfm = dfm[['Abogado'] + [str(y) for y in years] + ['Total']]
-            dfm.to_excel(writer, 'Métricas', startrow=1, startcol=1, index=False, header=True)
-            ws = writer.sheets['Métricas']
-            ws.merge_range(0,1,0,dfm.shape[1],
-                           f"Métricas de {display} al {fecha_cod}", title_fmt)
-            nr, nc = len(dfm), len(dfm.columns)
-            ws.add_table(1,1,1+nr,1+nc-1,{
-                'columns':[{'header':h} for h in dfm.columns],
-                'style':'Table Style Medium 9'
-            })
-            ws.set_column(1,1+nc-1,12,cell_fmt)
-
-            # Hojas por año
-            def tipo_ord(p): return 0 if p.upper().startswith('D-') else 1
-            def sufijo(p):
-                parts = p.upper().split('-')
-                return parts[3] if len(parts)>=4 else ''
-
-            for y in years:
-                ordered = sorted(
-                    data_by_year[y],
-                    key=lambda r: (
-                        tipo_ord(r['registro_ppu']),
-                        parse_ppu(r['registro_ppu'])[0],
-                        sufijo(r['registro_ppu'])
-                    )
-                )
-                dfy = pd.DataFrame(ordered).drop(columns=['id','_prohibida'], errors='ignore')
-                dfy.to_excel(writer, str(y), startrow=1, startcol=1, index=False, header=True)
-                ws2 = writer.sheets[str(y)]
-                ws2.merge_range(0,1,0,dfy.shape[1],
-                                f"Base de datos del año {y} - {display} a la fecha de {fecha_cod}", title_fmt)
-                nr2, nc2 = len(dfy), len(dfy.columns)
-                ws2.add_table(1,1,1+nr2,1+nc2-1,{
-                    'columns':[{'header':h} for h in dfy.columns],
-                    'style':'Table Style Medium 9'
-                })
-                ws2.set_column(1,1+nc2-1,12,cell_fmt)
-                # Sombrear celdas prohibidas dentro de la tabla
-                for idx, r in enumerate(ordered):
-                    if r['_prohibida']:
-                        for col_idx in range(nc2):
-                            val = dfy.iat[idx, col_idx]
-                            if pd.isna(val):
-                                ws2.write(2+idx, 1+col_idx, "", red_fmt)
-                            elif isinstance(val, pd.Timestamp):
-                                ws2.write(2+idx, 1+col_idx, val.strftime("%d-%m-%Y %H:%M"), red_fmt)
-                            else:
-                                ws2.write(2+idx, 1+col_idx, val, red_fmt)
-
-        # 12) Enviar respuesta
-        excel_data = output.getvalue()
-        response = make_response(excel_data)
-        response.headers.set("Content-Disposition", f'attachment; filename="{filename}"')
-        response.headers.set("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-        return response
-
-    except Exception as e:
-        app.logger.error("exportar_excel error: %s", e, exc_info=True)
-        return jsonify({"error": str(e)}), 500
-
-    finally:
-        cursor.close()
-        conn.close()
 
 
 
@@ -791,85 +293,7 @@ def get_registros():
         connection.close()
 
 
-@app.route('/api/actualizar_caso', methods=['POST'])
-@login_required
-def actualizar_caso():
-    data = request.json
-    registro_ppu = data.get('registro_ppu')
-    updated_data = data.get('data')
 
-    if not registro_ppu or not updated_data:
-        return jsonify({"error": "Registro PPU y datos a actualizar son requeridos"}), 400
-
-    user_role = session.get('role')
-
-    # Restricción de campos según rol:
-    if user_role == 'admin':
-        allowed_fields = ['abogado', 'denunciado', 'origen', 'nr de exp completo', 'delito',
-                          'departamento', 'fiscalia', 'juzgado', 'informe_juridico', 'item', 'e_situacional', 'etiqueta']
-    elif user_role == 'user':
-        # Para usuarios, solo se permite modificar "etiqueta"
-        allowed_fields = ['etiqueta']
-    else:
-        return jsonify({"error": "No autorizado"}), 403
-
-    data_to_update = {key: value for key, value in updated_data.items() if key in allowed_fields}
-
-    expediente_juzgado = data_to_update.pop('expediente_juzgado', None)
-    if expediente_juzgado:
-        if not isinstance(expediente_juzgado, dict):
-            return jsonify({"error": "El campo 'expediente_juzgado' debe ser un objeto."}), 400
-
-        errores = validate_expediente_juzgado(expediente_juzgado)
-        if errores:
-            return jsonify({"error": errores}), 400
-
-        expediente_formateado = (
-            f"Exp. {expediente_juzgado['campo1']}-"
-            f"{expediente_juzgado['campo2']}-"
-            f"{expediente_juzgado['campo3']}-"
-            f"{expediente_juzgado['campo4']}-"
-            f"{expediente_juzgado['campo5']}-"
-            f"{expediente_juzgado['campo6']}-"
-            f"{expediente_juzgado['campo7']}"
-        )
-        existing_origen = data_to_update.get('origen', '').strip()
-        if existing_origen:
-            existing_origen += f", {expediente_formateado}"
-        else:
-            existing_origen = expediente_formateado
-        data_to_update['origen'] = existing_origen
-    else:
-        if 'origen' in data_to_update and data_to_update['origen']:
-            if data_to_update['origen'][0].isdigit() and not data_to_update['origen'].startswith('CASO '):
-                data_to_update['origen'] = 'CASO ' + data_to_update['origen']
-
-    # Se asigna la fecha de última modificación
-    data_to_update['last_modified'] = datetime.now()
-
-    connection = get_db_connection()
-    if connection is None:
-        return jsonify({"error": "Error al conectar con la base de datos"}), 500
-
-    try:
-        cursor = connection.cursor()
-        # Establecer la variable de sesión @current_user para que el trigger registre el usuario que modifica
-        current_user = session.get('username', 'sistema')
-        cursor.execute("SET @current_user = %s", (current_user,))
-
-        set_clause = ', '.join(f"`{key}` = %s" for key in data_to_update.keys())
-        values = tuple(data_to_update.values()) + (registro_ppu,)
-
-        query = f'UPDATE datapenal SET {set_clause} WHERE registro_ppu = %s'
-        cursor.execute(query, values)
-        connection.commit()
-        return jsonify({"message": "Caso actualizado exitosamente"}), 200
-    except Exception as e:
-        print(f"Error al actualizar caso: {e}")
-        return jsonify({"error": "Error al actualizar caso"}), 500
-    finally:
-        cursor.close()
-        connection.close()
 
 
 
@@ -1911,6 +1335,202 @@ def get_datapenal_plazos():
         if connection.is_connected():
             connection.close()
 
+@app.route("/api/buscar_global", methods=["GET"])
+@login_required
+
+def buscar_global():
+    """
+    Búsqueda en `datapenal` con estos parámetros:
+
+      - query               -> texto libre (REGEXP) (buscador global)
+      - page, limit         -> paginación
+      - abogado             -> filtra por abogado (admin) o forzado para user
+      - mostrar_archivados  -> 'true' | 'false'
+      - year                -> filtrar registros de un año concreto
+      - tipo                -> 'DENUNCIA' | 'LEGAJO' | 'ALL'
+    """
+    query = request.args.get("query", "").strip()
+
+    try:
+        page = max(int(request.args.get("page", 1)), 1)
+    except ValueError:
+        page = 1
+
+    try:
+        limit = max(int(request.args.get("limit", 20)), 1)
+    except ValueError:
+        limit = 20
+
+    offset = (page - 1) * limit
+    mostrar_archivados = (request.args.get("mostrar_archivados", "true").lower() == "true")
+    year_param = request.args.get("year", "").strip()
+    tipo_param = request.args.get("tipo", "ALL").upper()
+    abogado_param = request.args.get("abogado", "").strip().upper()
+
+    app.logger.debug(
+        "→ Entrando a /api/datapenal/buscar_global params → query='%s', page=%d, limit=%d, "
+        "mostrar_archivados=%s, year='%s', tipo='%s', abogado='%s'",
+        query, page, limit, mostrar_archivados, year_param, tipo_param, abogado_param
+    )
+
+    user_role = session.get("role")
+    current_user = session.get("username", "")
+
+    if user_role == "user":
+        abogado_filter = username_to_abogado.get(current_user, "").upper()
+    else:
+        raw = abogado_param
+        abogado_filter = raw.split(";")[-1].strip().upper() if ";" in raw else raw.upper()
+
+    app.logger.debug(
+        "   • Filtro abogado → '%s' (rol=%s, user=%s)",
+        abogado_filter, user_role, current_user
+    )
+
+    connection = get_db_connection()
+    if connection is None:
+        app.logger.error("buscar_global: No se pudo conectar a la base de datos")
+        return jsonify({"error": "Error al conectar con la base de datos"}), 500
+
+    cursor = None
+    try:
+        cursor = connection.cursor(dictionary=True)
+
+        used_year = year_param
+        if not query and not year_param:
+            cursor.execute(
+                """
+                SELECT
+                  MAX(
+                    CAST(
+                      SUBSTRING_INDEX(
+                        SUBSTRING_INDEX(registro_ppu, '-', 3),
+                        '-',
+                        -1
+                      ) AS UNSIGNED
+                    )
+                  ) AS maxyear
+                FROM datapenal
+                WHERE registro_ppu IS NOT NULL AND registro_ppu != ''
+                """
+            )
+            result = cursor.fetchone()
+            maxyear = result.get("maxyear") if result else None
+            if maxyear:
+                used_year = str(maxyear)
+                app.logger.debug("   • Sin year ni query: uso año más alto → %s", used_year)
+
+        conditions = []
+        params = []
+
+        if not mostrar_archivados:
+            conditions.append("(d.etiqueta IS NULL OR d.etiqueta != %s)")
+            params.append("ARCHIVO")
+
+        if abogado_filter:
+            conditions.append("UPPER(TRIM(SUBSTRING_INDEX(d.abogado, ';', -1))) = %s")
+            params.append(abogado_filter)
+
+        if query:
+            cols = [
+                "abogado", "denunciado", "origen", "delito", "departamento",
+                "fiscalia", "informe_juridico", "item", "e_situacional",
+                "registro_ppu", "juzgado", "etiqueta",
+            ]
+            regexp = query_to_regexp(query)
+            sub_conds = [f"d.{c} REGEXP %s" for c in cols]
+            conditions.insert(0, "(" + " OR ".join(sub_conds) + ")")
+            params = [regexp] * len(cols) + params
+        else:
+            if used_year and used_year.isdigit():
+                if tipo_param == "DENUNCIA":
+                    pattern = rf"^D-[0-9]+-{re.escape(used_year)}(?:-[A-Z])?$"
+                elif tipo_param == "LEGAJO":
+                    pattern = (
+                        rf"^(?:LEG-[0-9]+-{re.escape(used_year)}(?:-[A-Z])?"
+                        rf"|L\. ?[0-9]+-{re.escape(used_year)}(?:-[A-Z])?)$"
+                    )
+                else:
+                    pattern = (
+                        rf"^(?:D-[0-9]+-{re.escape(used_year)}(?:-[A-Z])?"
+                        rf"|LEG-[0-9]+-{re.escape(used_year)}(?:-[A-Z])?"
+                        rf"|L\.?\s?[0-9]+-{re.escape(used_year)}(?:-[A-Z])?)$"
+                    )
+                conditions.append("d.registro_ppu REGEXP %s")
+                params.append(pattern)
+
+        where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+
+        sql = f"""
+            SELECT d.*
+            FROM datapenal d
+            {where_clause}
+        """
+        app.logger.debug("SQL:\n%s", sql)
+        app.logger.debug("params: %s", params)
+
+        cursor.execute(sql, params)
+        rows = cursor.fetchall()
+
+        for row in rows:
+            abogado = row.get("abogado") or ""
+            if ";" in abogado:
+                row["abogado"] = abogado.split(";")[-1].strip()
+
+        def extraer_year(ppu: str) -> int:
+            m = re.search(r"-(\d{4})(?:-|$)", ppu or "")
+            return int(m.group(1)) if m else 0
+
+        def tipo_order(ppu: str) -> int:
+            p = (ppu or "").upper()
+            if p.startswith("D-"):
+                return 0
+            if re.match(r"^(L\. ?|LEG-)", p, re.IGNORECASE):
+                return 1
+            return 2
+
+        def extraer_numero(ppu: str) -> int:
+            m = re.search(r"^(?:D-|LEG-?|L\.?\s?)(\d+)-", ppu or "", re.IGNORECASE)
+            return int(m.group(1)) if m else 0
+
+        def sort_key(r):
+            ppu = (r.get("registro_ppu") or "").upper()
+            return (-extraer_year(ppu), tipo_order(ppu), extraer_numero(ppu))
+
+        rows_sorted = sorted(rows, key=sort_key)
+
+        total_records = len(rows_sorted)
+        total_pages = (total_records + limit - 1) // limit
+        data_page = rows_sorted[offset: offset + limit]
+
+        for fila in data_page:
+            ab = fila.get("abogado", "") or ""
+            if ";" in ab:
+                fila["abogado"] = ab.split(";")[-1].strip().upper()
+            for k, v in list(fila.items()):
+                if v is None:
+                    fila[k] = ""
+
+        return jsonify({
+            "data": data_page,
+            "page": page,
+            "total_pages": total_pages,
+            "total_records": total_records,
+            "used_year": used_year,
+        })
+
+    except Exception as e:
+        app.logger.error("Error en /api/datapenal/buscar_global: %s", e, exc_info=True)
+        return jsonify({"error": "Error al realizar la búsqueda"}), 500
+
+    finally:
+        try:
+            if cursor is not None:
+                cursor.close()
+        finally:
+            connection.close()
+
+
 @app.route('/api/exportar_excel_plazos', methods=['GET'])
 @login_required
 def exportar_excel_plazos():
@@ -2310,105 +1930,7 @@ def actualizar_seguimiento():
 
 
         
-@app.route('/api/buscar_rango', methods=['GET'])
-@login_required
-def buscar_rango():
-    """
-    Busca registros dentro de un rango [ppu_inicio, ppu_fin].
-    """
-    ppu_inicio = request.args.get('ppu_inicio', '').strip()
-    ppu_fin = request.args.get('ppu_fin', '').strip()
-    query = request.args.get('query', '').strip()
 
-    # ===========================
-    # FORZAR ABOGADO para "user"
-    user_role = session.get('role')
-    current_username = session.get('username', '')
-    if user_role == 'user':
-        abogado_filter = username_to_abogado.get(current_username, '').upper()
-    else:
-        abogado_filter = request.args.get('abogado', '').strip().upper()
-    # ===========================
-
-    mostrar_archivados = request.args.get('mostrar_archivados', 'true').lower() == 'true'
-
-    connection = get_db_connection()
-    if connection is None:
-        return jsonify({"error": "Error al conectar con la base de datos"}), 500
-
-    try:
-        cursor = connection.cursor(dictionary=True)
-        conditions = []
-        params = []
-
-        if not mostrar_archivados:
-            conditions.append("(etiqueta IS NULL OR etiqueta != %s)")
-            params.append('ARCHIVO')
-
-        if abogado_filter:
-            selected_abogado_regex = f"(?i)\\b{re.escape(abogado_filter)}\\b"
-            conditions.append("abogado REGEXP %s")
-            params.append(selected_abogado_regex)
-
-        if query:
-            columns = [
-                'abogado','denunciado','origen','delito','departamento',
-                'fiscalia','informe_juridico','item','e_situacional','registro_ppu','juzgado','etiqueta'
-            ]
-            regexp_query = query_to_regexp(query)
-            regexp_conditions = []
-            regexp_params = []
-            for col in columns:
-                regexp_conditions.append(f"{col} REGEXP %s")
-                regexp_params.append(regexp_query)
-            if regexp_conditions:
-                conditions.append('(' + ' OR '.join(regexp_conditions) + ')')
-                params.extend(regexp_params)
-
-        where_clause = 'WHERE ' + ' AND '.join(conditions) if conditions else ''
-        sql_query = f"SELECT * FROM datapenal {where_clause}"
-        cursor.execute(sql_query, params)
-        all_data = cursor.fetchall()
-
-        # Ordenar en Python
-        all_data_sorted = sorted(all_data, key=lambda r: parse_ppu(r['registro_ppu']))
-
-        # Si no se especifica ni ppu_inicio ni ppu_fin, devuelves todo
-        if not ppu_inicio and not ppu_fin:
-            return jsonify({"data": all_data_sorted}), 200
-
-        # Determinar tuplas de rango
-        if ppu_inicio:
-            start_tuple = parse_ppu(ppu_inicio)
-        else:
-            start_tuple = (0, 0, 0, '')
-        if ppu_fin:
-            end_tuple = parse_ppu(ppu_fin)
-        else:
-            end_tuple = (999999, 999999, 999999, 'ZZZZ')
-
-        year_min = start_tuple[1]
-        year_max = end_tuple[1]
-
-        filtered_data = []
-        for row in all_data_sorted:
-            row_tuple = parse_ppu(row['registro_ppu'])
-            row_year = row_tuple[1]
-
-            if row_year < year_min or row_year > year_max:
-                continue
-            if row_tuple >= start_tuple and row_tuple <= end_tuple:
-                filtered_data.append(row)
-
-        return jsonify({"data": filtered_data}), 200
-
-    except Exception as e:
-        print(f"Error en buscar_rango: {e}")
-        return jsonify({"error": "Error interno en buscar_rango"}), 500
-    finally:
-        if cursor:
-            cursor.close()
-        connection.close()
 
 @app.route('/api/notifications', methods=['GET'])
 @login_required
@@ -2637,52 +2159,7 @@ def check_duplicate_situacion():
         cursor.close()
         connection.close()
 
-@app.route('/api/historiales', methods=['POST'])
-@login_required
-def obtener_historiales():
-    data = request.json
-    ppus = data.get('registro_ppu', [])
-    if not ppus:
-        return jsonify({"error": "No se proporcionaron registros PPU"}), 400
 
-    connection = get_db_connection()
-    if connection is None:
-        return jsonify({"error": "Error al conectar con la base de datos"}), 500
-
-    try:
-        cursor = connection.cursor(dictionary=True)
-        format_strings = ','.join(['%s'] * len(ppus))
-        sql = f"""
-            SELECT registro_ppu, version_id, abogado, denunciado, origen, juzgado, 
-                   fiscalia, departamento, e_situacional, DATE_FORMAT(fecha_version, '%d-%m-%Y') AS fecha_version, 
-                   usuario_modificacion, ruta
-            FROM datapenal_versioning
-            WHERE registro_ppu IN ({format_strings})
-            ORDER BY registro_ppu, fecha_version DESC
-        """
-        cursor.execute(sql, tuple(ppus))
-        rows = cursor.fetchall()
-
-        # Filtrar solo aquellos registros donde 'ruta' tenga un valor válido:
-        rows_filtrados = [
-            row for row in rows 
-            if row.get('ruta') and row['ruta'].strip() and row['ruta'].strip().upper() != "NULL"
-        ]
-
-        # Organizar los historiales en un diccionario
-        historiales = {}
-        for row in rows_filtrados:
-            ppu = row['registro_ppu']
-            if ppu not in historiales:
-                historiales[ppu] = []
-            historiales[ppu].append(row)
-
-        return jsonify({"historiales": historiales}), 200
-    except Exception as e:
-        return jsonify({"error": f"Error al obtener historiales: {str(e)}"}), 500
-    finally:
-        cursor.close()
-        connection.close()
 
 
 
@@ -3376,434 +2853,7 @@ def build_legajo_regexp(query):
     pattern = prefix_pattern + num_pattern + year_pattern
     return pattern
 
-@app.route("/api/new_search", methods=["GET"])
-@login_required
-def new_search():
-    query = request.args.get("query", "").strip()
-    search_field = request.args.get("search_field", "").strip()
-    logger.info(f"new_search: 'query'='{query}', 'search_field'='{search_field}'")
 
-    if not query:
-        logger.warning("new_search: Parámetro 'query' vacío")
-        return jsonify({"error": "El parámetro 'query' es obligatorio"}), 400
-
-    if not search_field:
-        logger.warning("new_search: Parámetro 'search_field' vacío")
-        return jsonify({"error": "El parámetro 'search_field' es obligatorio"}), 400
-
-    try:
-        connection = get_db_connection()
-        if connection is None:
-            logger.error("new_search: Error al conectar con la base de datos")
-            return jsonify({"error": "Error al conectar con la base de datos"}), 500
-
-        cursor = connection.cursor(dictionary=True)
-
-        # Se definen los patrones para búsquedas en campos relacionados a expedientes
-        exp_pattern_1 = r'(\d{5}-\d{4}-\d{1,2}-\d{4}[A-Z]?-([A-Z]{2})-[A-Z]{2}-\d{1,2})'
-        exp_pattern_2 = r'(\d{5}-\d{4}-\d{1,2}-[A-Z\d]+-[A-Z]{2}-[A-Z]{2}-\d{1,2})'
-
-        # Mapeo de columnas en cada tabla
-        field_map_datapenal = {
-            "legajo": "registro_ppu",
-            "casoFiscalCompleto": "`nr de exp completo`",
-            "casoJudicial": "origen",
-            "denunciado": "denunciado",
-        }
-        field_map_consulta = {
-            "legajo": "consulta_ppu",
-            "casoFiscalCompleto": "`nr de exp completo`",
-            "casoJudicial": "origen",
-            "denunciado": "denunciado",
-        }
-
-        if search_field not in field_map_datapenal:
-            logger.warning(f"new_search: 'search_field' no soportado: {search_field}")
-            return jsonify({"error": f"Campo de búsqueda no soportado: {search_field}"}), 400
-
-        # Rama para el campo "legajo"
-        if search_field == "legajo":
-            pattern = build_legajo_regexp(query)
-            if not pattern:
-                logger.warning("new_search: Formato inválido en 'query' para 'legajo'")
-                return jsonify({"error": "Formato de búsqueda inválido para registro PPU"}), 400
-
-            sql_datapenal = f"""
-                SELECT
-                    *,
-                    LENGTH({field_map_datapenal["legajo"]}) AS match_length,
-                    'datapenal' AS source
-                FROM datapenal
-                WHERE {field_map_datapenal["legajo"]} REGEXP %s
-                ORDER BY match_length ASC
-                LIMIT 10
-            """
-            params_datapenal = (pattern,)
-            sql_consulta = f"""
-                SELECT
-                    *,
-                    LENGTH({field_map_consulta["legajo"]}) AS match_length,
-                    'consulta' AS source
-                FROM consulta_ppupenal
-                WHERE {field_map_consulta["legajo"]} REGEXP %s
-                ORDER BY match_length ASC
-                LIMIT 10
-            """
-            params_consulta = (pattern,)
-            cursor.execute(sql_datapenal, params_datapenal)
-            results_datapenal = cursor.fetchall()
-            cursor.execute(sql_consulta, params_consulta)
-            results_consulta = cursor.fetchall()
-            combined_results = results_datapenal + results_consulta
-
-        # Rama para el campo "casoFiscalCompleto"
-        elif search_field == "casoFiscalCompleto":
-            query_sin_prefijo = query.upper().replace("CASO", "").strip()
-            partes = query_sin_prefijo.split("-")
-            if len(partes) >= 3 and partes[1].isdigit() and partes[2].isdigit():
-                query_invertida = f"{partes[2]}-{partes[1]}"
-            elif len(partes) == 2 and partes[0].isdigit() and partes[1].isdigit():
-                query_invertida = f"{partes[1]}-{partes[0]}"
-            else:
-                query_invertida = query_sin_prefijo
-
-            sql_datapenal = f"""
-                SELECT
-                    *,
-                    LENGTH({field_map_datapenal["casoFiscalCompleto"]}) AS match_length,
-                    'datapenal' AS source
-                FROM datapenal
-                WHERE {field_map_datapenal["casoFiscalCompleto"]} LIKE %s
-                   OR {field_map_datapenal["casoFiscalCompleto"]} LIKE %s
-                   OR origen LIKE %s
-                   OR origen LIKE %s
-            """
-            params_datapenal = (
-                f"%{query_sin_prefijo}%",
-                f"%{query_invertida}%",
-                f"%{query_sin_prefijo}%",
-                f"%{query_invertida}%"
-            )
-            cursor.execute(sql_datapenal, params_datapenal)
-            results_datapenal = cursor.fetchall()
-
-            sql_consulta = f"""
-                SELECT
-                    *,
-                    LENGTH({field_map_consulta["casoFiscalCompleto"]}) AS match_length,
-                    'consulta' AS source
-                FROM consulta_ppupenal
-                WHERE {field_map_consulta["casoFiscalCompleto"]} LIKE %s
-                   OR {field_map_consulta["casoFiscalCompleto"]} LIKE %s
-                   OR origen LIKE %s
-                   OR origen LIKE %s
-            """
-            params_consulta = (
-                f"%{query_sin_prefijo}%",
-                f"%{query_invertida}%",
-                f"%{query_sin_prefijo}%",
-                f"%{query_invertida}%"
-            )
-            cursor.execute(sql_consulta, params_consulta)
-            results_consulta = cursor.fetchall()
-            candidatos = results_datapenal + results_consulta
-
-            patron_exp_flexible = r'\b\d{6,10}\s*-\s*\d{4}\s*-\s*\d{1,4}(?:\s*-\s*\d+)?\b'
-
-            def partial_numeric_match_normal(candidate_value, query_value):
-                try:
-                    if "-" not in query_value:
-                        m = re.fullmatch(r'\s*(\d+)\s*-\s*(\d+)\s*', candidate_value)
-                        if not m:
-                            return False
-                        cand_first, cand_second = m.groups()
-                        q_norm = str(int(query_value))
-                        return cand_first.startswith(q_norm) or cand_second.startswith(q_norm)
-                    else:
-                        q_parts = query_value.split("-")
-                        if len(q_parts) != 2:
-                            return False
-                        q_first = str(int(q_parts[0]))
-                        q_second = q_parts[1].strip()
-                        m = re.fullmatch(r'\s*(\d+)\s*-\s*(\d+)\s*', candidate_value)
-                        if not m:
-                            return False
-                        cand_first, cand_second = m.groups()
-                        return (cand_first == q_first) and (cand_second.startswith(q_second))
-                except Exception:
-                    return False
-
-            def partial_numeric_match_inverted(candidate_value, query_value):
-                try:
-                    if "-" not in query_value:
-                        m = re.fullmatch(r'\s*(\d+)\s*-\s*(\d+)\s*', candidate_value)
-                        if not m:
-                            return False
-                        cand_first, cand_second = m.groups()
-                        q_norm = str(int(query_value))
-                        return cand_first.startswith(q_norm) or cand_second.startswith(q_norm)
-                    else:
-                        q_parts = query_value.split("-")
-                        if len(q_parts) != 2:
-                            return False
-                        q_first = q_parts[0].strip()
-                        q_second = str(int(q_parts[1]))
-                        m = re.fullmatch(r'\s*(\d+)\s*-\s*(\d+)\s*', candidate_value)
-                        if not m:
-                            return False
-                        cand_first, cand_second = m.groups()
-                        return cand_first.startswith(q_first) and (cand_second == q_second)
-                except Exception:
-                    return False
-
-            def coincide_caso(row):
-                campo_origen = row.get("origen") or ""
-                segmentos_origen = [seg.strip() for seg in campo_origen.split(",")]
-                valid_origen = []
-                for seg in segmentos_origen:
-                    if "CASO" in seg.upper():
-                        m = re.search(r'(?i)CASO\s*([\d-]+)', seg)
-                        if m:
-                            valid_origen.append(m.group(1).strip().upper())
-                match_origen = any(
-                    partial_numeric_match_normal(seg, query_sin_prefijo) or 
-                    partial_numeric_match_inverted(seg, query_invertida)
-                    for seg in valid_origen
-                )
-                campo_exp = row.get("nr de exp completo") or ""
-                segmentos_exp = [seg.strip() for seg in campo_exp.split(",")]
-                valid_exp = []
-                for seg in segmentos_exp:
-                    if re.fullmatch(patron_exp_flexible, seg):
-                        partes_seg = [p.strip() for p in seg.split("-")]
-                        if len(partes_seg) >= 4:
-                            relevante = f"{partes_seg[-3]}-{partes_seg[-2]}".upper()
-                        elif len(partes_seg) == 3:
-                            relevante = f"{partes_seg[-2]}-{partes_seg[-1]}".upper()
-                        else:
-                            continue
-                        valid_exp.append(relevante)
-                match_exp = any(
-                    partial_numeric_match_normal(seg, query_sin_prefijo) or 
-                    partial_numeric_match_inverted(seg, query_invertida)
-                    for seg in valid_exp
-                )
-                return match_origen or match_exp
-
-            filtrados = [r for r in candidatos if coincide_caso(r)]
-            resultados_unicos = []
-            vistos = set()
-            for r in filtrados:
-                clave = r.get("id")
-                if clave is None:
-                    clave = str(r)
-                if clave not in vistos:
-                    vistos.add(clave)
-                    resultados_unicos.append(r)
-            combined_results = resultados_unicos[:10]
-            return jsonify(combined_results), 200
-
-        # Rama para el campo "casoJudicial"
-        elif search_field == "casoJudicial":
-            sql_datapenal = """
-                SELECT
-                    *,
-                    LENGTH(origen) AS match_length,
-                    'datapenal' AS source
-                FROM datapenal
-                WHERE origen REGEXP %s OR origen REGEXP %s
-            """
-            params_datapenal = (exp_pattern_1, exp_pattern_2)
-            cursor.execute(sql_datapenal, params_datapenal)
-            results_datapenal = cursor.fetchall()
-            sql_consulta = """
-                SELECT
-                    *,
-                    LENGTH(origen) AS match_length,
-                    'consulta' AS source
-                FROM consulta_ppupenal
-                WHERE origen REGEXP %s OR origen REGEXP %s
-            """
-            params_consulta = (exp_pattern_1, exp_pattern_2)
-            cursor.execute(sql_consulta, params_consulta)
-            results_consulta = cursor.fetchall()
-            candidatos = results_datapenal + results_consulta
-
-            def coincide_caso_judicial(row):
-                exp_full = (row.get("origen") or "").replace("Exp.", "").replace("CASO", "").strip()
-                exp_parts = exp_full.split("-")
-                if not exp_parts:
-                    return False
-                query_clean = query.strip().upper()
-                query_fragments = query_clean.split("-")
-                if not query_fragments:
-                    return False
-                if query_clean.endswith("-"):
-                    if query_fragments[0].isdigit():
-                        query_first = query_fragments[0].zfill(5)
-                    else:
-                        return False
-                    return exp_parts[0] == query_first
-                exp_first = exp_parts[0]
-                query_first = query_fragments[0]
-                if query_first.startswith("0"):
-                    if not exp_first.upper().startswith(query_first):
-                        return False
-                else:
-                    if not exp_first.lstrip("0").startswith(query_first):
-                        return False
-                for frag in query_fragments[1:]:
-                    if not any(frag in part for part in exp_parts[1:]):
-                        return False
-                return True
-
-            filtrados = [r for r in candidatos if coincide_caso_judicial(r)]
-            combined_results = filtrados[:10]
-
-        # Rama para el campo "denunciado"
-        elif search_field == "denunciado":
-            # Filtro preliminar: limitar la cantidad de registros solicitados a la base de datos.
-            preliminary_query = f"%{query.upper()}%"
-            sql_datapenal = """
-                SELECT
-                    *,
-                    'datapenal' AS source
-                FROM datapenal
-                WHERE denunciado IS NOT NULL AND UPPER(denunciado) LIKE %s
-                LIMIT 100
-            """
-            cursor.execute(sql_datapenal, (preliminary_query,))
-            results_datapenal = cursor.fetchall()
-
-            sql_consulta = """
-                SELECT
-                    *,
-                    'consulta' AS source
-                FROM consulta_ppupenal
-                WHERE denunciado IS NOT NULL AND UPPER(denunciado) LIKE %s
-                LIMIT 100
-            """
-            cursor.execute(sql_consulta, (preliminary_query,))
-            results_consulta = cursor.fetchall()
-
-            candidates = results_datapenal + results_consulta
-
-            # Se intenta importar una versión optimizada de Levenshtein (rapidfuzz).
-            try:
-                from rapidfuzz.distance.Levenshtein import distance as levenshtein_distance
-            except ImportError:
-                # Si no está disponible, se utiliza la implementación propia en Python.
-                def levenshtein_distance(s, t):
-                    if s == t:
-                        return 0
-                    if len(s) == 0:
-                        return len(t)
-                    if len(t) == 0:
-                        return len(s)
-                    v0 = list(range(len(t) + 1))
-                    for i in range(1, len(s) + 1):
-                        v1 = [i] + [0] * len(t)
-                        for j in range(1, len(t) + 1):
-                            cost = 0 if s[i - 1] == t[j - 1] else 1
-                            v1[j] = min(v1[j - 1] + 1, v0[j] + 1, v0[j - 1] + cost)
-                        v0 = v1
-                    return v0[len(t)]
-
-            def normalize_text(text):
-                text = text.upper().strip()
-                replacements = {
-                    "V": "B",
-                    "Z": "S",
-                    "Y": "I"
-                }
-                for old, new in replacements.items():
-                    text = text.replace(old, new)
-                return text
-
-            normalized_query = normalize_text(query)
-
-            filtered = []
-            for row in candidates:
-                name = row.get("denunciado")
-                if name:
-                    # Se separa el campo en tokens, usando la coma como delimitador.
-                    tokens = [token.strip() for token in name.split(",")]
-                    min_distance = float('inf')
-                    for token in tokens:
-                        norm_token = normalize_text(token)
-                        # Se verifica si el término de búsqueda ya está contenido (coincidencia parcial).
-                        if normalized_query in norm_token:
-                            dist = 0
-                        else:
-                            dist = levenshtein_distance(normalized_query, norm_token)
-                        if dist < min_distance:
-                            min_distance = dist
-                        if min_distance == 0:
-                            break  # No es necesario seguir evaluando si se encontró una coincidencia exacta parcial.
-                    threshold = 2
-                    if min_distance <= threshold:
-                        row["levenshtein"] = min_distance
-                        filtered.append(row)
-
-            filtered.sort(key=lambda x: x["levenshtein"])
-            combined_results = filtered[:10]
-
-
-
-        # Rama genérica para otros campos
-        else:
-            partial_pattern = f"%{query}%"
-            where_clauses_datapenal = [f"{field_map_datapenal[search_field]} LIKE %s"]
-            params_datapenal_list = [partial_pattern]
-            if re.search(exp_pattern_1, query) or re.search(exp_pattern_2, query):
-                normalized = normalizar_expediente(query)
-                where_clauses_datapenal.append(f"{field_map_datapenal[search_field]} LIKE %s")
-                params_datapenal_list.append(f"%{normalized}%")
-            sql_datapenal = f"""
-                SELECT
-                    *,
-                    LENGTH({field_map_datapenal[search_field]}) AS match_length,
-                    'datapenal' AS source
-                FROM datapenal
-                WHERE {' OR '.join(where_clauses_datapenal)}
-                ORDER BY match_length ASC
-                LIMIT 10
-            """
-            params_datapenal = tuple(params_datapenal_list)
-            cursor.execute(sql_datapenal, params_datapenal)
-            results_datapenal = cursor.fetchall()
-            where_clauses_consulta = [f"{field_map_consulta[search_field]} LIKE %s"]
-            params_consulta_list = [partial_pattern]
-            if re.search(exp_pattern_1, query) or re.search(exp_pattern_2, query):
-                normalized = normalizar_expediente(query)
-                where_clauses_consulta.append(f"{field_map_consulta[search_field]} LIKE %s")
-                params_consulta_list.append(f"%{normalized}%")
-            sql_consulta = f"""
-                SELECT
-                    *,
-                    LENGTH({field_map_consulta[search_field]}) AS match_length,
-                    'consulta' AS source
-                FROM consulta_ppupenal
-                WHERE {' OR '.join(where_clauses_consulta)}
-                ORDER BY match_length ASC
-                LIMIT 10
-            """
-            params_consulta = tuple(params_consulta_list)
-            cursor.execute(sql_consulta, params_consulta)
-            results_consulta = cursor.fetchall()
-            combined_results = results_datapenal + results_consulta
-
-        return jsonify(combined_results), 200
-
-    except Exception as e:
-        logger.error(f"Error en new_search: {e}", exc_info=True)
-        return jsonify({"error": "Error interno del servidor"}), 500
-
-    finally:
-        if cursor:
-            cursor.close()
-        if connection and connection.is_connected():
-            connection.close()
 
 
 
@@ -4094,914 +3144,6 @@ def guardar_observacion():
 # -------------------------------------------------------------------- #
 
 
-# -------------------------------------------------------------------- #
-# ---------------------------------MODO BUSQUEDA ----------------------- #
-# -------------------------------------------------------------------- #
-
-@app.route('/api/busqueda_rapida', methods=['GET'])
-@login_required
-def busqueda_rapida():
-    q       = request.args.get('q', '').strip()
-    origen  = request.args.get('origen', '').strip()
-    depto   = request.args.get('departamento', '').strip()
-
-    if not q:
-        return jsonify([])
-
-    pattern = f"%{q}%"
-    conn    = get_db_connection()
-    if conn is None:
-        return jsonify([]), 500
-
-    try:
-        cursor = conn.cursor(dictionary=True)
-        sql = """
-         SELECT
-            abogado                                   AS abogado,
-            registro_ppu                              AS `registro_ppu`,
-            registro_ppu                              AS registroPpu,
-            denunciado                                AS denunciado,
-            origen                                    AS origen,
-            `nr de exp completo`                      AS nr_de_exp_completo,
-            fiscalia                                  AS fiscaliaOrigen,
-            departamento                              AS departamento,
-            juzgado                                   AS juzgado,
-            delito                                    AS delito,
-            e_situacional                             AS e_situacional,
-            informe_juridico                          AS informeJuridico,
-            item                                      AS item,
-            fecha_ingreso                             AS fechaIngreso,
-            etiqueta                                  AS etiqueta,
-            fecha_de_archivo                          AS fechaDeArchivo,
-            razon_archivo                             AS razonArchivo
-         FROM datapenal
-         WHERE
-            (registro_ppu         LIKE %s OR
-             abogado              LIKE %s OR
-             denunciado           LIKE %s OR
-             origen               LIKE %s OR
-             `nr de exp completo` LIKE %s OR
-             fiscalia             LIKE %s OR
-             departamento         LIKE %s OR
-             juzgado              LIKE %s OR
-             delito               LIKE %s OR
-             e_situacional        LIKE %s OR
-             informe_juridico     LIKE %s)
-        """
-        params = [pattern] * 11
-
-        if origen:
-            sql += " AND origen LIKE %s"
-            params.append(f"%{origen}%")
-        if depto:
-            sql += " AND departamento LIKE %s"
-            params.append(f"%{depto}%")
-
-        sql += " ORDER BY registro_ppu LIMIT 50"
-
-        cursor.execute(sql, params)
-        rows = cursor.fetchall()
-
-        # Normaliza fechas a ISO para el frontend (keys camelCase que la grilla espera)
-        from datetime import date, datetime
-        for r in rows:
-            if r.get('fechaIngreso') and isinstance(r['fechaIngreso'], (date, datetime)):
-                r['fechaIngreso'] = r['fechaIngreso'].strftime('%Y-%m-%d')
-            if r.get('fechaDeArchivo') and isinstance(r['fechaDeArchivo'], (date, datetime)):
-                r['fechaDeArchivo'] = r['fechaDeArchivo'].strftime('%Y-%m-%d')
-
-        return jsonify(rows)
-    except Exception:
-        return jsonify([]), 500
-    finally:
-        cursor.close()
-        conn.close()
-
-
-
-@app.route('/api/juzgado_incompleto', methods=['GET'])
-@login_required
-def juzgado_incompleto():
-    pattern = request.args.get('pattern', '').strip()
-    if not pattern:
-        return jsonify([]), 400
-
-    # Conecta a la BD monitoreo_descargas_sinoe
-    conn = get_db_connection(database='monitoreo_descargas_sinoe')
-    if conn is None:
-        return jsonify([]), 500
-
-    try:
-        cursor = conn.cursor(dictionary=True)
-        sql = """
-          SELECT juzgado_incompleto
-          FROM conteo_exp
-          WHERE nombre_original REGEXP %s
-          LIMIT 1
-        """
-        cursor.execute(sql, (pattern,))
-        row = cursor.fetchone()
-        return jsonify([row] if row else [])
-    except Exception as e:
-        app.logger.error("juzgado_incompleto error:", exc_info=True)
-        return jsonify([]), 500
-    finally:
-        cursor.close()
-        conn.close()
-
-@app.route('/api/fiscalia_incompleto', methods=['GET'])
-@login_required
-def fiscalia_incompleto():
-    pattern = request.args.get('pattern', '').strip()
-    if not pattern:
-        return jsonify([]), 400
-
-    # Conecta a la BD que contiene la tabla dependencias_fiscales_mpfn
-    conn = get_db_connection(database='datappupenal')
-    if conn is None:
-        return jsonify([]), 500
-
-    try:
-        cursor = conn.cursor(dictionary=True)
-        # Buscamos por las primeras 10 cifras exactas
-        regexp = f'^{pattern}'
-        sql = """
-          SELECT nr_de_exp_completo, fiscalia, departamento
-          FROM dependencias_fiscales_mpfn
-          WHERE nr_de_exp_completo REGEXP %s
-          LIMIT 1
-        """
-        cursor.execute(sql, (regexp,))
-        row = cursor.fetchone()
-        return jsonify([row] if row else [])
-    except Exception:
-        app.logger.error("fiscalia_incompleto error:", exc_info=True)
-        return jsonify([]), 500
-    finally:
-        cursor.close()
-        conn.close()
-
-
-# Campos que puede enviar el frontend (claves del payload)
-ALL_FRONT_FIELDS = [
-    # claves usadas por el front / existentes en datapenal
-    'registroPpu',
-    'abogado', 'denunciado', 'origen',
-    'nrDeExpCompleto',      # ← alias camel de `nr de exp completo`
-    'fiscaliaOrigen',       # ← alias del campo fiscalia
-    'departamento', 'juzgado', 'delito',
-    'informeJuridico', 'item',
-    'eSituacional',         # ← alias camel de e_situacional
-    'fechaIngreso',
-    'etiqueta',
-    'fechaDeArchivo',       # ← nuevo: existe en la tabla
-    'razonArchivo',  
-]
-
-
-def get_allowed_fields_for_user(username: str, users: dict) -> set:
-    """
-    Política de edición por usuario:
-      - No admins: nada (solo ver).
-      - Manuel (admin): todo.
-      - agarcia (admin): nada (bloqueado).
-      - jgranda (admin): todo MENOS eSituacional.
-      - Resto de admins: todo.
-    """
-    info = users.get(username, {})
-    role = info.get("role", "user")
-
-    if role != "admin":
-        return set()  # no admins no pueden editar nada
-
-    if username == "Manuel":
-        return set(ALL_FRONT_FIELDS)
-
-    if username == "agarcia":
-        return set()  # admin sin permisos de edición
-
-    if username == "jgranda":
-        return set([f for f in ALL_FRONT_FIELDS if f != 'eSituacional'])
-
-    # cualquier otro admin
-    return set(ALL_FRONT_FIELDS)
-
-@app.route('/api/me', methods=['GET'])
-@login_required
-def api_me():
-    """
-    Devuelve identidad, permisos y si el usuario puede editar algo.
-    """
-    username = session.get('username') or ''
-    role = session.get('role') or 'user'
-
-    allowed_fields = get_allowed_fields_for_user(username, users)
-    allowed_list = sorted(allowed_fields)
-
-    return jsonify({
-        "username": username,
-        "role": role,
-        "allowedFields": allowed_list,  # Lista de campos que puede editar
-        "canEdit": bool(allowed_list)   # True si hay al menos un campo editable
-    }), 200
-
-
-
-
-@app.route('/api/busqueda_rapida_sync', methods=['POST'])
-@login_required
-def busqueda_rapida_sync():
-    username = session.get("username")
-    if not username:
-        return jsonify(error="No autenticado"), 401
-
-    allowed_fields = get_allowed_fields_for_user(username, users)
-    if not allowed_fields:
-        app.logger.warning(f"busqueda_rapida_sync: Acceso denegado para {username}")
-        return jsonify(error="Acceso denegado"), 403
-
-    rows = request.get_json() or []
-    if not isinstance(rows, list):
-        app.logger.warning('busqueda_rapida_sync: payload inválido, se esperaba lista de registros')
-        return jsonify(updated=[]), 400
-
-    conn = get_db_connection()
-    if conn is None:
-        app.logger.error('busqueda_rapida_sync: error al conectar a la base de datos')
-        return jsonify(updated=[]), 500
-
-    cursor = conn.cursor(dictionary=True)
-
-    # Alinea el NOW() del trigger con hora de Lima (UTC-5)
-    try:
-        cursor.execute("SET time_zone = '-05:00'")
-    except Exception:
-        app.logger.warning("No se pudo fijar time_zone de sesión; se continúa con la del servidor.")
-
-    updated_ppus = []
-
-    # Normaliza cualquier tipo a string “segura” para comparar (no para escribir fechas)
-    def _s(v):
-        if v is None:
-            return ''
-        try:
-            return str(v).strip()
-        except Exception:
-            return ''
-
-    # Normaliza fechas a formato aceptado por MySQL o None (NULL)
-    # Acepta: '', None, 'YYYY-MM-DD', 'YYYY-MM-DD HH:MM:SS', 'DD/MM/YYYY', 'DD-MM-YYYY'
-    from datetime import datetime, date
-    def _date_norm(v):
-        if v is None:
-            return None
-        if isinstance(v, (datetime,)):
-            return v.strftime('%Y-%m-%d')
-        if isinstance(v, (date,)):
-            return v.strftime('%Y-%m-%d')
-        sv = str(v).strip()
-        if not sv:
-            return None
-        for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%d', '%d/%m/%Y', '%d-%m-%Y'):
-            try:
-                dt = datetime.strptime(sv, fmt)
-                return dt.strftime('%Y-%m-%d')
-            except ValueError:
-                continue
-        # Si no parsea, mejor enviar NULL que cadena vacía
-        return None
-
-    try:
-        for idx, new_row in enumerate(rows, start=1):
-            ppu = new_row.get('registroPpu')
-            if not ppu:
-                app.logger.warning(f"[Fila {idx}] Sin 'registroPpu', se omite")
-                continue
-
-            # 🔒 Defensa: ignorar cualquier intento de setear fechaDeArchivo desde el front
-            if 'fechaDeArchivo' in new_row:
-                new_row.pop('fechaDeArchivo', None)
-
-            app.logger.info(f"[Fila {idx}] ({username}) Datos recibidos (PPU: {ppu}): {new_row}")
-
-            # 1) Traer valores actuales desde la base (todas las columnas que se comparan)
-            cursor.execute("""
-                SELECT
-                    abogado,
-                    denunciado,
-                    origen,
-                    `nr de exp completo`  AS nr_de_exp_completo,
-                    fiscalia              AS fiscalia_origen,
-                    departamento,
-                    juzgado,
-                    delito,
-                    e_situacional,
-                    informe_juridico,
-                    item,
-                    fecha_ingreso,
-                    fecha_e_situacional,
-                    etiqueta,
-                    last_modified,
-                    fecha_de_archivo,
-                    razon_archivo AS razonArchivo
-                FROM datapenal
-                WHERE registro_ppu = %s
-            """, (ppu,))
-            db_row = cursor.fetchone()
-            if not db_row:
-                app.logger.warning(f"[Fila {idx}] No se encontró registro en BD para PPU: {ppu}")
-                continue
-
-            # 2) Comparar campo a campo (solo los permitidos)
-            diffs = {}
-
-            # ⚠️ Quitamos 'fechaDeArchivo' del comparador. La maneja el TRIGGER en BD.
-            comparadores = [
-                ('abogado',            'abogado'),
-                ('denunciado',         'denunciado'),
-                ('origen',             'origen'),
-                ('nrDeExpCompleto',    'nr_de_exp_completo'),
-                ('fiscaliaOrigen',     'fiscalia_origen'),
-                ('departamento',       'departamento'),
-                ('juzgado',            'juzgado'),
-                ('delito',             'delito'),
-                ('informeJuridico',    'informe_juridico'),
-                ('item',               'item'),
-                ('eSituacional',       'e_situacional'),
-                ('fechaIngreso',       'fecha_ingreso'),
-                ('fechaESituacional',  'fecha_e_situacional'),
-                ('etiqueta',           'etiqueta'),
-                ('razonArchivo',       'razon_archivo')
-            ]
-
-            # Solo fechas que el front puede modificar (NO incluir fecha_de_archivo ni last_modified)
-            date_fields = {'fecha_ingreso', 'fecha_e_situacional'}
-
-            for front_key, db_key in comparadores:
-                if front_key not in allowed_fields:
-                    continue
-
-                if db_key in date_fields:
-                    new_val_norm = _date_norm(new_row.get(front_key))
-                    old_raw = db_row.get(db_key)
-
-                    if isinstance(old_raw, (datetime, date)):
-                        old_val_norm = old_raw.strftime('%Y-%m-%d')
-                    else:
-                        old_val_norm = _date_norm(old_raw)
-
-                    if new_val_norm != old_val_norm:
-                        if db_key == 'nr_de_exp_completo':
-                            diffs['`nr de exp completo`'] = new_val_norm
-                        elif db_key == 'fiscalia_origen':
-                            diffs['fiscalia'] = new_val_norm
-                        else:
-                            diffs[db_key] = new_val_norm  # None → NULL
-                else:
-                    new_val = _s(new_row.get(front_key))
-                    old_val = _s(db_row.get(db_key))
-                    if new_val != old_val:
-                        if db_key == 'nr_de_exp_completo':
-                            diffs['`nr de exp completo`'] = new_val
-                        elif db_key == 'fiscalia_origen':
-                            diffs['fiscalia'] = new_val
-                        else:
-                            diffs[db_key] = new_val
-
-            # 3) Si hay diferencias permitidas, actualizar
-            if diffs:
-                # 🔒 Defensa extra: por si apareció por error
-                diffs.pop('fecha_de_archivo', None)
-
-                set_parts = [f"{col} = %s" for col in diffs.keys()]
-                params = list(diffs.values()) + [ppu]
-                sql = f"UPDATE datapenal SET {', '.join(set_parts)} WHERE registro_ppu = %s"
-                cursor.execute(sql, params)
-
-                updated_ppus.append(ppu)
-                app.logger.info(f"[Fila {idx}] ({username}) Cambios aplicados PPU {ppu}: {list(diffs.keys())}")
-            else:
-                app.logger.info(f"[Fila {idx}] ({username}) Sin cambios (o sin permisos) para PPU: {ppu}")
-
-        conn.commit()
-        app.logger.info(f"busqueda_rapida_sync: total registros actualizados → {len(updated_ppus)} por {username}")
-        return jsonify(updated=updated_ppus), 200
-
-    except Exception:
-        conn.rollback()
-        app.logger.exception('busqueda_rapida_sync error', exc_info=True)
-        return jsonify(updated=[]), 500
-    finally:
-        try:
-            cursor.close()
-        except Exception:
-            pass
-        try:
-            conn.close()
-        except Exception:
-            pass
-
-
-# -------------------------HISTORIAL BOTON--------------- #
-
-
-
-# columnas que el grid envía (snakeCase)  ⇢  columna real en BD
-# columnas que existen en AMBAS tablas (datapenal y datapenal_versioning)
-COLUMNS_MAP = {
-    'registro_ppu':           '`registro_ppu`',
-    'abogado':                '`abogado`',
-    'denunciado':             '`denunciado`',
-    'origen':                 '`origen`',
-    'nr_de_exp_completo':     '`nr de exp completo`',
-    'fiscaliaOrigen':         '`fiscalia`',
-    'fiscalia':               '`fiscalia`',
-    'departamento':           '`departamento`',
-    'juzgado':                '`juzgado`',
-    'delito':                 '`delito`',
-    'e_situacional':          '`e_situacional`',
-    'informe_juridico':       '`informe_juridico`',
-    'item':                   '`item`',
-    'fecha_ingreso':          '`fecha_ingreso`',
-    'etiqueta':               '`etiqueta`',
-    'fecha_de_archivo':       '`fecha_de_archivo`',
-    'razon_archivo':          '`razon_archivo`',
-}
-
-# columnas que existen SOLO en datapenal_versioning
-VERSION_ONLY_COLUMNS = {
-    'ruta': '`ruta`',
-}
-
-
-
-def _norm(v):
-    """igual que en laboral: quita mayúsc/minúsc-tildes-espacios para comparar."""
-    import unidecode, re
-    if v is None:
-        return ''
-    v = str(v).strip().lower()
-    v = unidecode.unidecode(v)
-    v = re.sub(r'\s+', ' ', v)
-    return v
-
-# 1) ¿QUÉ CAMPOS CAMBIARON? ──────────────────────────────────
-@app.route('/api/busqueda_rapida_history_available', methods=['GET'])
-@login_required
-def history_available_penal():
-    app.logger.debug(">> /history_available – inicio")
-    ppu = request.args.get('ppu', '').strip()
-    app.logger.debug("   parámetros → ppu='%s'", ppu)
-
-    if not ppu:
-        app.logger.warning("   ppu vacío; 400")
-        return jsonify(success=False, fields=[]), 400
-
-    conn = get_db_connection()          # BD «datappupenal»
-    if conn is None:
-        app.logger.error("   conexión BD fallida; 500")
-        return jsonify(success=False, fields=[]), 500
-    cur = conn.cursor(dictionary=True)
-
-    try:
-        # 1️⃣ versiones guardadas
-        cols_versions = ",\n       ".join(
-            [f"{col} AS {snake}" for snake, col in COLUMNS_MAP.items()] +
-            [f"{col} AS {snake}" for snake, col in VERSION_ONLY_COLUMNS.items()]
-        )
-
-        sql_versions = f"""
-            SELECT version_id,
-                   {cols_versions}
-              FROM datapenal_versioning
-             WHERE registro_ppu = %s
-             ORDER BY version_id
-        """
-
-        cols_current = ", ".join(f"{col} AS {snake}" for snake, col in COLUMNS_MAP.items())
-
-        sql_current = f"""
-            SELECT {cols_current}
-              FROM datapenal
-             WHERE registro_ppu = %s
-        """
-
-        app.logger.debug("   SQL versiones:\n%s", sql_versions)
-        cur.execute(sql_versions, (ppu,))
-        versions = cur.fetchall()
-        app.logger.debug("   versiones encontradas: %d", len(versions))
-
-        if not versions:
-            return jsonify(success=True, fields=[]), 200
-
-        # 2️⃣ fila actual
-        sql_current = f"""
-            SELECT {', '.join(f"{col} AS {snake}"
-                              for snake, col in COLUMNS_MAP.items())}
-              FROM datapenal
-             WHERE registro_ppu = %s
-        """
-        cur.execute(sql_current, (ppu,))
-        current = cur.fetchone() or {}
-        app.logger.debug("   fila actual obtenida")
-
-        # 3️⃣ comparar
-        changed = []
-        for snake in COLUMNS_MAP:
-            cur_norm   = _norm(current.get(snake))
-            hist_norms = [_norm(v[snake]) for v in versions
-                          if v[snake] not in (None, '')]
-            if any(h != cur_norm for h in hist_norms):
-                changed.append(snake)
-
-        app.logger.debug("   campos cambiados: %s", changed)
-        return jsonify(success=True, fields=changed), 200
-
-    except Exception:
-        import traceback; traceback.print_exc()
-        app.logger.exception("   ERROR en /history_available")
-        return jsonify(success=False, fields=[]), 500
-
-    finally:
-        cur.close(); conn.close()
-        app.logger.debug("<< /history_available – fin")
-
-# ────────────────────────────────────────────────────────────
-#  1-bis)  ¿QUÉ CAMPOS CAMBIARON?  (varios PPU a la vez)
-#          POST  /api/busqueda_rapida_history_available_bulk
-#          Body →  ["D-123-2024", "LEG-99-2022", …]
-#          Res  →  {
-#                     "D-123-2024": ["abogado","nr_de_exp_completo"],
-#                     "LEG-99-2022": [],
-#                     …
-#                   }
-# ────────────────────────────────────────────────────────────
-@app.route('/api/busqueda_rapida_history_available_bulk', methods=['POST'])
-@login_required
-def history_available_bulk_penal():
-    app.logger.debug(">> /history_available_bulk – inicio")
-
-    ppus = request.get_json(silent=True) or []
-    if not isinstance(ppus, list) or not ppus:
-        app.logger.warning("   payload vacío o no-lista; 400")
-        return jsonify({}), 400
-
-    # ­­­— normaliza y elimina duplicados —­­­
-    ppus = sorted({str(p).strip() for p in ppus if str(p).strip()})
-    placeholders = ",".join(["%s"] * len(ppus))
-    app.logger.debug("   ppus recibidos: %s", ppus)
-
-    conn = get_db_connection()
-    if conn is None:
-        app.logger.error("   conexión BD fallida; 500")
-        return jsonify({}), 500
-    cur = conn.cursor(dictionary=True)
-
-    try:
-        # 1️⃣  Traer todas las versiones de TODOS los ppu solicitados
-        cols_versions = ",\n       ".join(
-            [f"{col} AS {snake}" for snake, col in COLUMNS_MAP.items()] +
-            [f"{col} AS {snake}" for snake, col in VERSION_ONLY_COLUMNS.items()]
-        )
-
-        sql_versions = f"""
-            SELECT registro_ppu,
-                   version_id,
-                   {cols_versions}
-            FROM datapenal_versioning
-            WHERE registro_ppu IN ({placeholders})
-            ORDER BY registro_ppu, version_id
-        """
-
-        cols_current = ", ".join(f"{col} AS {snake}" for snake, col in COLUMNS_MAP.items())
-
-        sql_current = f"""
-            SELECT registro_ppu,
-                   {cols_current}
-            FROM datapenal
-            WHERE registro_ppu IN ({placeholders})
-        """
-
-        app.logger.debug("   SQL versiones bulk:\n%s", sql_versions)
-        cur.execute(sql_versions, ppus)
-        all_versions = cur.fetchall()           # ← lista de dicts
-
-        # 2️⃣  Fila actual para cada PPU
-        sql_current = f"""
-            SELECT registro_ppu,
-                   {', '.join(f"{col} AS {snake}"
-                              for snake, col in COLUMNS_MAP.items())}
-            FROM datapenal
-            WHERE registro_ppu IN ({placeholders})
-        """
-        app.logger.debug("   SQL current bulk:\n%s", sql_current)
-        cur.execute(sql_current, ppus)
-        current_rows = cur.fetchall()
-
-        # ­­­—  dicts rápidos:  ppu -> filaActual  /  ppu -> [versions…] —­­­
-        current_map  = {r['registro_ppu']: r for r in current_rows}
-        versions_map = {}
-        for v in all_versions:
-            versions_map.setdefault(v['registro_ppu'], []).append(v)
-
-        # 3️⃣  Comparar por cada ppu
-        result = {}
-        for ppu in ppus:
-            cur_row   = current_map.get(ppu, {})
-            versions  = versions_map.get(ppu, [])
-
-            if not versions:
-                result[ppu] = []
-                continue
-
-            changed = []
-            for snake in COLUMNS_MAP:
-                cur_norm   = _norm(cur_row.get(snake))
-                hist_norms = [_norm(v[snake])
-                              for v in versions
-                              if v[snake] not in (None, '')]
-                if any(h != cur_norm for h in hist_norms):
-                    changed.append(snake)
-
-            result[ppu] = changed
-
-        app.logger.debug("   resultado bulk listo")
-        return jsonify(result), 200
-
-    except Exception:
-        import traceback; traceback.print_exc()
-        app.logger.exception("   ERROR en /history_available_bulk")
-        return jsonify({}), 500
-
-    finally:
-        cur.close(); conn.close()
-        app.logger.debug("<< /history_available_bulk – fin")
-
-# 2) DETALLE DE UN CAMPO ─────────────────────────────────────
-@app.route('/api/busqueda_rapida_history', methods=['GET'])
-@login_required
-def busqueda_rapida_history_penal():
-    app.logger.debug(">> /history_detail – inicio")
-    ppu   = request.args.get('ppu', '').strip()
-    field = request.args.get('field', '').strip()
-    app.logger.debug("   parámetros → ppu='%s', field='%s'", ppu, field)
-
-    if not ppu or not field:
-        app.logger.warning("   ppu o field faltantes; 400")
-        return jsonify(success=False, message='ppu y field son obligatorios'), 400
-
-    real_col = COLUMNS_MAP.get(field)
-    if not real_col:
-        app.logger.warning("   field desconocido: %s", field)
-        return jsonify(success=False, message='Campo desconocido'), 400
-
-    conn = get_db_connection()
-    if conn is None:
-        app.logger.error("   conexión BD fallida; 500")
-        return jsonify(success=False, data=[]), 500
-    cur = conn.cursor(dictionary=True)
-
-    try:
-        # 1) Valor actual (tabla principal)
-        sql_current = f"""
-            SELECT {real_col} AS cur_value
-              FROM datapenal
-             WHERE registro_ppu = %s
-        """
-        cur.execute(sql_current, (ppu,))
-        cur_val = (cur.fetchone() or {}).get('cur_value')
-        app.logger.debug("   valor actual = %s", cur_val)
-
-        # 2) Versiones del campo (para e_situacional también traemos ruta)
-        if field == 'e_situacional':
-            sql_versions = f"""
-                SELECT version_id,
-                       {real_col}        AS old_value,
-                       fecha_version,
-                       usuario_modificacion,
-                       `ruta`            AS ruta
-                  FROM datapenal_versioning
-                 WHERE registro_ppu = %s
-                   AND {real_col} IS NOT NULL
-                   AND CAST({real_col} AS CHAR) <> ''
-                 ORDER BY version_id
-            """
-        else:
-            sql_versions = f"""
-                SELECT version_id,
-                       {real_col}        AS old_value,
-                       fecha_version,
-                       usuario_modificacion
-                  FROM datapenal_versioning
-                 WHERE registro_ppu = %s
-                   AND {real_col} IS NOT NULL
-                   AND CAST({real_col} AS CHAR) <> ''
-                 ORDER BY version_id
-            """
-
-        cur.execute(sql_versions, (ppu,))
-        versions = cur.fetchall()
-        app.logger.debug("   versiones encontradas: %d", len(versions))
-
-        # 3) Armar lista según campo
-        cur_norm = _norm(cur_val)
-
-        if field == 'e_situacional':
-            # Diferentes al actual
-            different = [v for v in versions if _norm(v['old_value']) != cur_norm]
-
-            # Entre las IGUALES al actual, priorizar la que tenga ruta; si no, la más reciente
-            same_list = [dict(v) for v in reversed(versions) if _norm(v['old_value']) == cur_norm]  # más nueva → más vieja
-            chosen_same = next((v for v in same_list if v.get('ruta')), None) or (same_list[0] if same_list else None)
-
-            # “Actual” sintético desde la tabla principal (fallback si no hay chosen_same)
-            current_row = {
-                'version_id': 0,
-                'old_value': cur_val,
-                'fecha_version': None,
-                'usuario_modificacion': '(actual)',
-                # 'ruta': None  # no se incluye si no es de versioning; el front tolera ausencia
-            }
-
-            rows = []
-            # Siempre mostramos una fila “Actual” en e_situacional (con ruta si hay, si no la sintética)
-            if chosen_same:
-                chosen_same['usuario_modificacion'] = '(actual)'
-                rows.append(chosen_same)
-            else:
-                rows.append(current_row)
-
-            # Si hay diferencias, también las agregamos
-            rows.extend(different)
-
-            filtered = rows
-
-        else:
-            # Para campos ≠ e_situacional:
-            different = [v for v in versions if _norm(v['old_value']) != cur_norm]
-
-            # Si NO hay diferencias, no hay historial
-            if not different:
-                return jsonify(success=True, data=[]), 200
-
-            # Incluir el ACTUAL desde la tabla principal (no de versioning)
-            current_row = {
-                'version_id': 0,
-                'old_value': cur_val,
-                'fecha_version': None,
-                'usuario_modificacion': '(actual)'
-            }
-
-            filtered = [current_row] + different
-
-        # 4) Deduplicación por valor normalizado
-        #    - e_situacional: preferir el que tenga ruta; si empatan, el más reciente.
-        #    - otros campos: primera aparición (comportamiento clásico).
-        from datetime import datetime
-
-        def _parse_dt(s):
-            try:
-                if isinstance(s, datetime):
-                    return s
-                if not s:
-                    return None
-                try:
-                    return datetime.strptime(str(s), "%Y-%m-%d %H:%M:%S")
-                except ValueError:
-                    try:
-                        return datetime.strptime(str(s), "%d-%m-%Y %H:%M:%S")
-                    except ValueError:
-                        return None
-            except Exception:
-                return None
-
-        if field == 'e_situacional':
-            by_val = {}  # ov_norm -> item elegido
-            for v in filtered:
-                ov_norm = _norm(v['old_value'])
-                prev = by_val.get(ov_norm)
-                if prev is None:
-                    by_val[ov_norm] = v
-                    continue
-
-                prev_has = bool(prev.get('ruta'))
-                v_has = bool(v.get('ruta'))
-
-                # 1) Preferir el que tenga ruta
-                if v_has and not prev_has:
-                    by_val[ov_norm] = v
-                    continue
-                if prev_has and not v_has:
-                    continue
-
-                # 2) Si ambos (o ninguno) tienen ruta, preferir MÁS RECIENTE
-                prev_dt = _parse_dt(prev.get('fecha_version'))
-                v_dt = _parse_dt(v.get('fecha_version'))
-                if prev_dt and v_dt:
-                    if v_dt > prev_dt:
-                        by_val[ov_norm] = v
-                else:
-                    # Respaldo por version_id
-                    try:
-                        if int(v.get('version_id') or 0) > int(prev.get('version_id') or 0):
-                            by_val[ov_norm] = v
-                    except Exception:
-                        pass
-
-            unique = list(by_val.values())
-
-        else:
-            seen, unique = set(), []
-            for v in filtered:
-                ov_norm = _norm(v['old_value'])
-                if ov_norm not in seen:
-                    seen.add(ov_norm)
-                    unique.append(v)
-
-        result = unique[:1] if len(unique) == 1 else unique
-        app.logger.debug("   valores devueltos: %d", len(result))
-
-        # 5) Formateo final
-        from datetime import datetime as _dt, date as _date
-        def _fmt(x):
-            if isinstance(x, (_dt, _date)):
-                return x.strftime('%d-%m-%Y %H:%M:%S')
-            return '' if x is None else str(x)
-
-        history = []
-        for r in result:
-            item = {
-                'version_id':           r.get('version_id'),
-                'old_value':            _fmt(r.get('old_value')),
-                'fecha_version':        _fmt(r.get('fecha_version')),
-                'usuario_modificacion': _fmt(r.get('usuario_modificacion')),
-            }
-            # Incluir ruta SOLO para e_situacional (si la trae desde versioning)
-            if field == 'e_situacional' and 'ruta' in r:
-                item['ruta'] = r.get('ruta')
-            history.append(item)
-
-        return jsonify(success=True, data=history), 200
-
-    except Exception as e:
-        import traceback; traceback.print_exc()
-        app.logger.exception("   ERROR en /history_detail")
-        return jsonify(success=False, message=str(e)), 500
-
-    finally:
-        try:
-            cur.close()
-        finally:
-            conn.close()
-        app.logger.debug("<< /history_detail – fin")
-
-
-from flask import send_file, abort
-import os
-
-# Debe coincidir con la base real donde viven los PDFs
-ALLOWED_BASE = r'\\agarciaf\NOTIFICACIONES RENIEC\MESA DE PARTES\PENAL\NOTIFICACIONES'
-
-def _is_safe_path(path, base):
-    # Normaliza y comprueba que la ruta esté dentro de la base permitida
-    p = os.path.normpath(path)
-    b = os.path.normpath(base)
-    try:
-        return os.path.commonpath([p, b]) == b
-    except Exception:
-        return False
-
-@app.route('/api/open_pdf_by_ruta', methods=['GET'])
-@login_required
-def open_pdf_by_ruta():
-    app.logger.info("[open_pdf_by_ruta] Cookie=%r", request.headers.get('Cookie'))
-    app.logger.info("[open_pdf_by_ruta] session.keys=%s", list(session.keys()))
-    ruta = request.args.get('ruta', '').strip()
-
-    if not ruta:
-        return jsonify({"error": "Parámetro 'ruta' es obligatorio"}), 400
-
-    # Validar que esté dentro de la base permitida
-    if not _is_safe_path(ruta, ALLOWED_BASE):
-        return jsonify({"error": "Ruta fuera de la ubicación permitida"}), 403
-
-    if not os.path.exists(ruta):
-        app.logger.warning("Archivo no encontrado: %s", ruta)
-        return jsonify({"error": "El archivo no existe en el servidor"}), 404
-
-    try:
-        return send_file(ruta, mimetype='application/pdf', as_attachment=False)
-    except Exception:
-        app.logger.exception("Error en /api/open_pdf_by_ruta")
-        return jsonify({"error": "Error al abrir el PDF"}), 500
-
-
-
-
-# -------------------------FIN-HISTORIAL BOTON--------------- #
-# -------------------------------------------------------------------- #
-# ---------------------------------MODO BUSQUEDA ----------------------- #
-# -------------------------------------------------------------------- #
 
 
 ################FIN DE IMPULSO####################
@@ -5118,14 +3260,26 @@ def escribir_datos_en_hoja(ws, titulo, headers, filas,
         ch.fill = PatternFill("solid", fgColor="4F81BD")
         ch.border = thin
 
+
     # Datos
     row_xl = start_row + 1
     for fila in filas:
         for j, v in enumerate(fila):
-            cell = ws.cell(row=row_xl, column=start_col + j, value=_safe_value(v))
+            # Detectar valores con formato "dd-mm-YYYY HH:MM"
+            if isinstance(v, str) and re.match(r'^\d{2}-\d{2}-\d{4}\s+\d{2}:\d{2}$', v):
+                try:
+                    dt = datetime.strptime(v, "%d-%m-%Y %H:%M")
+                    cell = ws.cell(row=row_xl, column=start_col + j, value=dt)
+                    cell.number_format = "dd-mm-yyyy hh:mm"  # ← formato Excel real
+                except Exception:
+                    cell = ws.cell(row=row_xl, column=start_col + j, value=_safe_value(v))
+            else:
+                cell = ws.cell(row=row_xl, column=start_col + j, value=_safe_value(v))
+
             cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
             cell.border = thin
         row_xl += 1
+
 
     # Ajuste de anchos
     for i in range(ncols):
@@ -5163,6 +3317,20 @@ def generar_excel_global_modificado(registros, ruta_out):
         )
 
     if audiencias:
+        # 🧭 Ordenar de más reciente a menos reciente según fecha y hora de audiencia
+        def parse_fecha_audiencia(x):
+            v = x.get("plazo_atencion")
+            if isinstance(v, datetime):
+                return v
+            if isinstance(v, str):
+                try:
+                    return datetime.strptime(v, "%d-%m-%Y %H:%M")
+                except Exception:
+                    pass
+            return datetime.min  # si no se puede interpretar
+
+        audiencias.sort(key=parse_fecha_audiencia, reverse=True)
+
         ws = wb.create_sheet("Audiencias")
         escribir_datos_en_hoja(
             ws,

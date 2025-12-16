@@ -25,6 +25,7 @@ import TablaMinima from './components/tabla_minima.jsx';
 import PlazosAcciones from './components/plazos_acciones';
 import Principal from './components/principal';
 import Vencidos from './components/Vencidos';
+import AutoFit from "./aesthetics/autofit";
 
 
 
@@ -1754,10 +1755,11 @@ function App() {
    
 
     return (
-        <div style={{ padding: '20px' }}>
-            <AppBar position="static" style={{ marginBottom: '20px' }}>
+        <AutoFit>
+            {/* HEADER FIJO (NO SCROLLEA) */}
+            <AppBar position="static">
                 <Toolbar>
-                    <Typography variant="h6" style={{ flexGrow: 1 }}>
+                    <Typography variant="h6" sx={{ flexGrow: 1 }}>
                         Sistema de Gestion de Casos
                     </Typography>
                     {isLoggedIn && (
@@ -1768,7 +1770,7 @@ function App() {
                 </Toolbar>
             </AppBar>
 
-            {/* Modal para subir seguimiento */}
+            {/* MODAL SEGUIMIENTO (NO AFECTA SCROLL) */}
             <Modal open={openSeguimientoModal} onClose={handleCloseSeguimientoModal}>
                 <Box
                     sx={{
@@ -1787,9 +1789,9 @@ function App() {
                     }}
                 >
                     <Typography variant="h6">Subir Seguimiento</Typography>
+
                     {rowSeguimiento && (
                         <Typography>
-                            {/* Mostrar información de la tabla activa */}
                             Origen: {activeTable === "plazos_acciones" ? "Plazos y Acciones" : "Plazos Vencidos"}
                             <br />
                             Abogado: {rowSeguimiento.abogado}
@@ -1809,33 +1811,28 @@ function App() {
                             onChange={handlePDFUploadChange}
                         />
                     </Button>
+
                     {seguimientoPDF && <Typography>Archivo: {seguimientoPDF.name}</Typography>}
 
                     <Box display="flex" justifyContent="space-between" mt={2}>
-                        <Button
-                            variant="contained"
-                            color="error"
-                            onClick={handleCloseSeguimientoModal}
-                        >
+                        <Button variant="contained" color="error" onClick={handleCloseSeguimientoModal}>
                             Cancelar
                         </Button>
-                        <Button
-                            variant="contained"
-                            color="primary"
-                            onClick={handleGuardarSeguimiento}
-                        >
+                        <Button variant="contained" color="primary" onClick={handleGuardarSeguimiento}>
                             Guardar
                         </Button>
                     </Box>
                 </Box>
             </Modal>
 
+            {/* CONTENIDO PRINCIPAL (ALTO CONTROLADO POR AUTOFIT) */}
             {!isLoggedIn ? (
-                <Box display="flex" justifyContent="center" alignItems="center" minHeight="60vh">
-                    <Paper elevation={3} style={{ padding: '40px', maxWidth: '400px', width: '100%' }}>
+                <Box display="flex" justifyContent="center" alignItems="center" flex={1}>
+                    <Paper elevation={3} sx={{ p: 4, maxWidth: 400, width: "100%" }}>
                         <Typography variant="h5" align="center" gutterBottom>
                             Iniciar Sesión
                         </Typography>
+
                         <TextField
                             label="Usuario"
                             variant="outlined"
@@ -1844,6 +1841,7 @@ function App() {
                             fullWidth
                             margin="normal"
                         />
+
                         <TextField
                             label="Contraseña"
                             variant="outlined"
@@ -1853,73 +1851,49 @@ function App() {
                             fullWidth
                             margin="normal"
                         />
-                        <Button variant="contained" color="primary" onClick={handleLogin} fullWidth style={{ marginTop: '20px' }}>
+
+                        <Button
+                            variant="contained"
+                            color="primary"
+                            onClick={handleLogin}
+                            fullWidth
+                            sx={{ mt: 2 }}
+                        >
                             Iniciar Sesión
                         </Button>
                     </Paper>
                 </Box>
             ) : (
                 <>
-                    <Tabs
-                        value={tab}
-                        onChange={(e, newValue) => setTab(newValue)}
-                        aria-label="tabs"
-                        style={{ marginBottom: '20px' }}
-                    >
+                    {/* TABS (NO SCROLLEAN) */}
+                    <Tabs value={tab} onChange={(e, v) => setTab(v)}>
                         <Tab label="Actualizacion de Situacion" />
-                        {role === 'user' && <Tab label="Notificaciones" />}
-                        {((role === 'admin') || (Array.isArray(role) && role.includes('coordinador'))) && <Tab label="Consulta" />}
-                        {role === 'admin' && <Tab label="Resumen Minimalista" />}
+                        {role === "user" && <Tab label="Notificaciones" />}
+                        {(role === "admin" || (Array.isArray(role) && role.includes("coordinador"))) && (
+                            <Tab label="Consulta" />
+                        )}
+                        {role === "admin" && <Tab label="Resumen Minimalista" />}
                         <Tab label="Plazos y Acciones" />
                         <Tab label="Plazos Vencidos" />
                     </Tabs>
 
-                    {((role === 'admin') || (Array.isArray(role) && role.includes('coordinador'))) && tab === 1 && isLoggedIn && (
-                        <Consulta />
+                    {/* VISTAS (EL SCROLL VA DENTRO DE CADA UNA) */}
+                    {tab === 0 && (
+                        <Principal
+                            isLoggedIn={isLoggedIn}
+                            username={username}
+                            role={role}
+                        />
                     )}
 
-                    {role === 'user' && tab === 1 && (
-                        <Box>
-                            <Notifications />
-                        </Box>
-                    )}
+                    {role === "admin" && tab === 2 && <TablaMinima />}
 
-  
-
-                    
-                   
-                        {tab === 0 && (
-                            <Principal
-                                isLoggedIn={isLoggedIn}
-                                username={username}
-                                role={role}
-                            />
-                        )}
-
-
-
-
-
-
-
-
-
-
-
-
-
-                        {
-                            role === 'admin' && tab === 2 && isLoggedIn && (<TablaMinima />
-                            )}
-
-
-
-                        {isLoggedIn &&
-                            (
-                                (role === 'admin' && tab === 3) ||
-                                (role === 'user' && tab === 2) ||
-                                ((Array.isArray(role) && role.includes('coordinador')) && tab === 2)
-                            ) && (
+                    {isLoggedIn &&
+                        (
+                            (role === "admin" && tab === 3) ||
+                            (role === "user" && tab === 2) ||
+                            (Array.isArray(role) && role.includes("coordinador") && tab === 2)
+                        ) && (
                             <PlazosAcciones
                                 queryPlazos={queryPlazos}
                                 handleQueryPlazosChange={handleQueryPlazosChange}
@@ -1946,57 +1920,46 @@ function App() {
                                 impulsoResultado={impulsoResultado}
                                 setImpulsoResultado={setImpulsoResultado}
                                 role={role}
-                                username={username}  // ← Aquí debe llegar el username correcto
+                                username={username}
                                 API_BASE_URL={API_BASE_URL}
                             />
+                        )}
 
-                            )
-                        }
-
-
-
-
-                            </>
-                        )
-                    }  {/* <-- cierras aquí el condicional del Bloque 1 con una } */}
-
-                    
-            {/* Bloque “Plazos Vencidos” */}
-            {isLoggedIn && (
-                (role === 'admin' && tab === 4) ||
-                (role === 'user' && tab === 3) ||
-                (Array.isArray(role) && role.includes('coordinador') && tab === 3)
-            ) && (
-                    <Vencidos
-                        queryPlazos={queryPlazos}
-                        handleQueryPlazosChange={handleQueryPlazosChange}
-                        selectedAbogadoPlazos={selectedAbogadoPlazos}
-                        setSelectedAbogadoPlazos={setSelectedAbogadoPlazos}
-                        mostrarArchivadosPlazos={mostrarArchivadosPlazos}
-                        setMostrarArchivadosPlazos={setMostrarArchivadosPlazos}
-                        plazosData={plazosData}
-                        pagePlazos={pagePlazos}
-                        setPagePlazos={setPagePlazos}
-                        totalPagesPlazos={totalPagesPlazos}
-                        totalRecordsPlazos={totalRecordsPlazos}
-                        loadingPlazos={loadingPlazos}
-                        errorPlazos={errorPlazos}
-                        debouncedBuscarPlazosData={debouncedBuscarPlazosData}
-                        API_BASE_URL={API_BASE_URL}
-                        role={role}
-                        getRowBackgroundColor={getRowBackgroundColor}
-                        formatDate={formatDate}
-                        handleOpenSeguimientoModal={handleOpenSeguimientoModal}
-                    handleBorrarFila={handleBorrarFila}
-                    username={username} 
-                    />
-                )}
-
-
-                
-            )
-        </div>
+                    {isLoggedIn &&
+                        (
+                            (role === "admin" && tab === 4) ||
+                            (role === "user" && tab === 3) ||
+                            (Array.isArray(role) && role.includes("coordinador") && tab === 3)
+                        ) && (
+                            <Vencidos
+                                queryPlazos={queryPlazos}
+                                handleQueryPlazosChange={handleQueryPlazosChange}
+                                selectedAbogadoPlazos={selectedAbogadoPlazos}
+                                setSelectedAbogadoPlazos={setSelectedAbogadoPlazos}
+                                mostrarArchivadosPlazos={mostrarArchivadosPlazos}
+                                setMostrarArchivadosPlazos={setMostrarArchivadosPlazos}
+                                plazosData={plazosData}
+                                pagePlazos={pagePlazos}
+                                setPagePlazos={setPagePlazos}
+                                totalPagesPlazos={totalPagesPlazos}
+                                totalRecordsPlazos={totalRecordsPlazos}
+                                loadingPlazos={loadingPlazos}
+                                errorPlazos={errorPlazos}
+                                debouncedBuscarPlazosData={debouncedBuscarPlazosData}
+                                API_BASE_URL={API_BASE_URL}
+                                role={role}
+                                getRowBackgroundColor={getRowBackgroundColor}
+                                formatDate={formatDate}
+                                handleOpenSeguimientoModal={handleOpenSeguimientoModal}
+                                handleBorrarFila={handleBorrarFila}
+                                username={username}
+                            />
+                        )}
+                </>
+            )}
+        </AutoFit>
     );
+
 }
 
 export default App;

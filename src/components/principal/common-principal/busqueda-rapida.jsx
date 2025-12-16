@@ -12,11 +12,18 @@ import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 import PictureAsPdfIcon from '@mui/icons-material/PictureAsPdf';
 
 import CloseIcon from '@mui/icons-material/Close';
-import { DataGrid, useGridApiRef } from '@mui/x-data-grid';   // ← apiRef
+import { DataGrid, useGridApiRef } from '@mui/x-data-grid';
 import { Autocomplete } from '@mui/material';
 import debounce from 'lodash.debounce';
 import axios from 'axios';
+
+// ⟵ importa tu componente de caso
+import Caso from './caso/caso';
+
+
 import RestoreIcon from '@mui/icons-material/SettingsBackupRestore';
+import ManageSearchIcon from '@mui/icons-material/ManageSearch';    // ⟵ NUEVO (icono botón Scan)
+
 import { Paper, Popper } from '@mui/material';
 import { usePermisos } from '../../../hooks/usePermisos';
 // Estilos para el modal de pantalla completa
@@ -50,12 +57,32 @@ const API_BASE_URL = 'http://10.50.5.49:5001/api';
 
 
 
-export default function BusquedaRapida({ open, onClose }) {
+export default function BusquedaRapida({ open, onClose, registro_ppu = "" }) {
+
     const apiRef = useGridApiRef(); 
+    // Estados de filtros y datos
     // Estados de filtros y datos
     const [query, setQuery] = useState('');
     const [origenFilter, setOrigen] = useState('');
     const [deptoFilter, setDepto] = useState('');
+
+    /* ✅ NUEVO: ref + seed/focus al abrir */
+    const inputRef = useRef(null);
+
+    useEffect(() => {
+        if (!open) return;
+
+        const v = String(registro_ppu ?? "").trim();
+        setQuery(v);
+
+        requestAnimationFrame(() => {
+            if (inputRef.current) {
+                inputRef.current.focus();
+                inputRef.current.select?.();
+            }
+        });
+    }, [open, registro_ppu]);
+
     const [rows, setRows] = useState([]);
     const [editState, setEditState] = useState({ cell: null, value: '' });
 const [histModal, setHistModal] = useState({
@@ -73,7 +100,8 @@ const lastBlobUrlRef = useRef(null);
 const [viewerMeta, setViewerMeta] = useState(null);
 
 /* Abrir en nueva pestaña vía Blob */
-const [openingNewTab, setOpeningNewTab] = useState(false);
+    const [openingNewTab, setOpeningNewTab] = useState(false);
+    const [scanning, setScanning] = useState(false);
 
     const [historyAvail, setHistoryAvail] = useState({});
     const [historyData, setHistoryData] = useState({});   // «ppu|field» -> detalle
@@ -191,79 +219,99 @@ const [openingNewTab, setOpeningNewTab] = useState(false);
 
 
     // Debounced backend search
+    // ⟵ Helper reutilizable para sembrar/normalizar filas desde backend
+    const normalizeRowsFromBackend = (dataArray) => {
+        return (dataArray || []).map((r, i) => {
+            const id = i;
+
+            // Guarda valores originales para resaltado/restore
+            Object.keys(r).forEach((field) => {
+                const key = `${id}-${field}`;
+                if (originalValues.current[key] === undefined) {
+                    originalValues.current[key] = r[field];
+                }
+            });
+
+            // Origen → expediente/caso
+            const origenText = r.origen ?? '';
+            const startsWithCaso = /^Caso/i.test(origenText.trim());
+            const expMatch = startsWithCaso ? null : origenText.match(/Exp\.[^,]*/i);
+
+            const expedienteParte = expMatch ? expMatch[0].trim() : '';
+            const resto = origenText.split(/,\s*/).filter(p => !/^Exp\./i.test(p));
+            const casoParte = expMatch ? resto.join(', ').trim() : origenText.trim();
+
+            // Guarda originales también de los derivados (para el Popper/restore)
+            originalValues.current[`${id}-expedienteParte`] = expedienteParte;
+            originalValues.current[`${id}-casoParte`] = casoParte;
+
+            // Fiscalía limpia + despacho
+            let despacho = '';
+            let fiscaliaLimpia = r.fiscaliaOrigen ?? '';
+            const dm = fiscaliaLimpia.match(/\s*-\s*(\d+)\s+DESPACHO$/i);
+            if (dm) {
+                despacho = dm[1];
+                fiscaliaLimpia = fiscaliaLimpia.replace(/\s*-\s*\d+\s+DESPACHO$/i, '').trim();
+            }
+
+            // Guarda originales de fiscalía/departamento
+            originalDeps.current[`${id}-fiscaliaOrigen`] = r.fiscaliaOrigen;
+            originalDeps.current[`${id}-departamento`] = r.departamento;
+
+            return {
+                id,
+                ...r,
+                fiscaliaOrigen: fiscaliaLimpia,
+                expedienteParte,
+                casoParte,
+                despacho,
+                _historyFields: []
+            };
+        });
+    };
+
+    // Debounced backend search (usando el helper)
     const debouncedSearch = useMemo(
         () =>
             debounce(async (q, origen, depto) => {
-                if (!q.trim()) {
+                const qq = String(q || "").trim();
+                if (!qq) {
                     setRows([]);
                     return;
                 }
 
-                const params = { q };
+                const key = brKey(qq, origen, depto);
+                const hit = brCacheRef.current.get(key);
+                const now = Date.now();
+
+                if (hit && now - hit.ts < BR_CACHE_TTL_MS) {
+                    originalJuzgado.current = {};
+                    originalValues.current = {};
+                    originalDeps.current = {};
+                    setRows(normalizeRowsFromBackend(hit.list || []));
+                    return;
+                }
+
+                const params = { q: qq };
                 if (origen) params.origen = origen;
                 if (depto) params.departamento = depto;
 
                 try {
-                    const { data } = await axios.get('/api/busqueda_rapida', { params });
+                    const { data } = await axios.get("/api/busqueda_rapida", { params });
 
-                    // Reinicia caches para este nuevo resultado
                     originalJuzgado.current = {};
                     originalValues.current = {};
                     originalDeps.current = {};
 
-                    setRows(
-                        data.map((r, i) => {
-                            const id = i;
+                    const list = Array.isArray(data) ? data : data?.rows || [];
+                    brCacheRef.current.set(key, { ts: now, list });
 
-                            // 1) Guarda el valor original de cada propiedad
-                            Object.keys(r).forEach(field => {
-                                const key = `${id}-${field}`;
-                                if (originalValues.current[key] === undefined) {
-                                    originalValues.current[key] = r[field];
-                                }
-                            });
+                    if (brCacheRef.current.size > 30) {
+                        const firstKey = brCacheRef.current.keys().next().value;
+                        brCacheRef.current.delete(firstKey);
+                    }
 
-                            // 2) Guarda originales de fiscalía y departamento
-                            originalDeps.current[`${id}-fiscaliaOrigen`] = r.fiscaliaOrigen;
-                            originalDeps.current[`${id}-departamento`] = r.departamento;
-
-                            // 3) Separa Expediente / Caso
-                            const origenText = r.origen ?? '';
-                            const startsWithCaso = /^Caso/i.test(origenText.trim());
-                            const expMatch = startsWithCaso ? null
-                                : origenText.match(/Exp\.[^,]*/i);
-
-                            const expedienteParte = expMatch ? expMatch[0].trim() : '';
-                            const resto = origenText
-                                .split(/,\s*/)
-                                .filter(p => !/^Exp\./i.test(p));
-                            const casoParte = expMatch ? resto.join(', ').trim()
-                                : origenText.trim();
-                            originalValues.current[`${id}-expedienteParte`] = expedienteParte;
-                            originalValues.current[`${id}-casoParte`] = casoParte;
-
-                            // 4) Despacho: si fiscalía termina en “- n DESPACHO” lo separamos
-                            let despacho = '';
-                            let fiscaliaLimpia = r.fiscaliaOrigen ?? '';
-                            const dm = fiscaliaLimpia.match(/\s*-\s*(\d+)\s+DESPACHO$/i);
-                            if (dm) {
-                                despacho = dm[1];                 // sólo el número
-                                fiscaliaLimpia = fiscaliaLimpia
-                                    .replace(/\s*-\s*\d+\s+DESPACHO$/i, '')
-                                    .trim();
-                            }
-
-                            // 5) Devuelve la fila ya normalizada
-                            return {
-                                id,
-                                ...r,
-                                fiscaliaOrigen: fiscaliaLimpia,
-                                expedienteParte,
-                                casoParte,
-                                despacho,
-                                _historyFields: []        // ← para saber luego qué columnas tienen historial
-                            }; })
-                    );
+                    setRows(normalizeRowsFromBackend(list));
                 } catch {
                     setRows([]);
                 }
@@ -272,6 +320,40 @@ const [openingNewTab, setOpeningNewTab] = useState(false);
     );
 
 
+
+
+    // ⟵ NUEVO: handler que llama a /api/busqueda_rapida_scan y llena la grilla
+    const handleScanCarpeta = async () => {
+        try {
+            setScanning(true);
+
+            // Si tu backend soporta opciones:
+            // const body = { move: true, root: '\\\\agarciaf\\NOTIFICACIONES RENIEC\\MESA DE PARTES\\Correo\\A pasar' };
+            const body = { move: true };
+            const { data } = await axios.post('/api/busqueda_rapida_scan', body);
+
+            // Reinicia caches antes de sembrar nuevas filas
+            originalJuzgado.current = {};
+            originalValues.current = {};
+            originalDeps.current = {};
+
+            // El backend puede retornar { rows: [...] } o directamente un array
+            const rowsIn = Array.isArray(data) ? data : (data.rows || []);
+            setRows(normalizeRowsFromBackend(rowsIn));
+
+            // (Opcional) feedback de conteos si tu API los devuelve
+            if (data?.scanned_count != null) {
+                const found = data?.ppus_count ?? data?.found_count ?? rowsIn.length;
+                const moved = data?.moved_count ?? 0;
+                console.log(`Escaneados: ${data.scanned_count} | PPUs: ${found} | Movidos: ${moved}`);
+            }
+        } catch (e) {
+            console.error('Fallo el escaneo', e);
+            alert('No se pudo completar el escaneo.');
+        } finally {
+            setScanning(false);
+        }
+    };
 
 
     useEffect(() => {
@@ -333,15 +415,33 @@ const [openingNewTab, setOpeningNewTab] = useState(false);
     const handleChangeDepto = e => setDepto(e.target.value);
 
     // Cierra modal y reinicia todo
+    const BR_CACHE_TTL_MS = 5 * 60 * 1000;
+    const brCacheRef = useRef(
+        globalThis.__PPU_BR_SEARCH_CACHE__ ||
+        (globalThis.__PPU_BR_SEARCH_CACHE__ = new Map())
+    );
+
+    const brKey = (q, origen, depto) =>
+        `${String(q || "").trim().toUpperCase()}|${String(origen || "")
+            .trim()
+            .toUpperCase()}|${String(depto || "").trim().toUpperCase()}`;
+
+    const resetBusqueda = () => {
+        setQuery("");
+        setOrigen("");
+        setDepto("");
+        setRows([]);
+        setEditState({ cell: null, value: "", editing: false });
+        originalJuzgado.current = {};
+        originalValues.current = {};
+        originalDeps.current = {};
+    };
+
     const handleClose = () => {
         onClose();
-        setQuery('');
-        setOrigen('');
-        setDepto('');
-        setRows([]);
-        setEditState({ cell: null, value: '' });
-        originalJuzgado.current = {};
+        setEditState((p) => ({ ...p, editing: false }));
     };
+
 
     // Se dispara al entrar en modo edición
     const handleCellEditStart = params => {
@@ -603,10 +703,20 @@ useEffect(() => {
         }
 
         // ——— 3) Recalcular 'origen' preservando “CASO” si ya estaba en `origen` ———
+        // ——— 3) Recalcular 'origen' preservando “CASO” si ya estaba en `origen` ———
         const expPart = newRow.expedienteParte?.trim() ?? '';
         const casoPart = newRow.casoParte?.trim() ?? '';
 
+        // 🔥 NUEVO — Abre el popup siempre que CASO cambie
+        if (newRow.casoParte !== oldRow.casoParte) {
+            setCasoDialog({
+                open: true,
+                row: newRow,
+            });
+        }
+
         const parts = [];
+
         if (expPart) parts.push(expPart.startsWith('Exp.') ? expPart : `Exp. ${expPart}`);
 
         if (casoPart) {
@@ -915,8 +1025,9 @@ const cmpDesc = (a, b) => {
 
     /* ====== columnas extra: ocultas por defecto; activables bajo demanda ====== */
     const [extraCols, setExtraCols] = useState([]);
-    /* visibilidad: false por defecto para que no estorben */
     const [columnVisibilityModel, setColumnVisibilityModel] = useState({
+        nr_de_exp_completo: false,   // 👈 Caso Fiscal completo oculto por defecto
+        despacho: false,             // 👈 Despacho oculto por defecto
         informeJuridico: false,
         item: false,
         fechaIngreso: false,
@@ -925,8 +1036,18 @@ const cmpDesc = (a, b) => {
         razonArchivo: false,
     });
 
+
+    // ⟵ NUEVO: diálogo externo para editar CASO
+    const [casoDialog, setCasoDialog] = useState({
+        open: false,
+        row: null,
+    });
+
+
     /* opciones para el selector */
     const EXTRA_OPTIONS = [
+        { field: 'nr_de_exp_completo', label: 'Caso Fiscal completo' }, // 👈 PRIMERO
+        { field: 'despacho', label: 'Despacho' },                       // 👈 SEGUNDO
         { field: 'informeJuridico', label: 'Informe jurídico' },
         { field: 'item', label: 'Item' },
         { field: 'fechaIngreso', label: 'Fecha ingreso' },
@@ -937,14 +1058,34 @@ const cmpDesc = (a, b) => {
 
     /* definiciones de columnas extra (simples; sin ensanchar la grilla) */
     const EXTRA_COLUMNS = [
+        {
+            field: 'nr_de_exp_completo',
+            headerName: 'Caso Fiscal completo',
+            width: 220,
+            editable: true,
+            renderCell: (p) => withHistoryButton(
+                p,
+                (q) => <Typography>{q.value}</Typography>
+            ),
+            renderEditCell: (p) => withHistoryButton(p, renderWithRestore),
+        },
+        {
+            field: 'despacho',
+            headerName: 'Desp.',
+            width: 90,
+            type: 'number',
+            headerAlign: 'center',
+            align: 'center',
+            editable: true,
+            renderEditCell: renderWithRestore,
+        },
         { field: 'informeJuridico', headerName: 'Informe jurídico', width: 180, editable: true, renderEditCell: renderWithRestore },
         { field: 'item', headerName: 'Item', width: 110, editable: true, renderEditCell: renderWithRestore },
         { field: 'fechaIngreso', headerName: 'F. ingreso', width: 120, editable: true, renderEditCell: renderWithRestore },
         { field: 'etiqueta', headerName: 'Etiqueta', width: 100, editable: true, renderEditCell: renderWithRestore },
         { field: 'fechaDeArchivo', headerName: 'F. archivo', width: 130, editable: false },
         { field: 'razonArchivo', headerName: 'Razón archivo', width: 100, editable: true, renderEditCell: renderWithRestore },
-    ]; 
-
+    ];
 
 
 
@@ -1043,22 +1184,19 @@ const cmpDesc = (a, b) => {
             headerName: 'Expediente',
             flex: 1,
             editable: true,
-            valueGetter: params => {
-                const origen = (params.row.origen || '').trim();
-                // Si empieza por "Caso", no mostramos nada
-                if (/^Caso/i.test(origen)) {
-                    return '';
-                }
-                // Intentamos extraer con los patrones
-                const m = expPattern1.exec(origen) || expPattern2.exec(origen);
-                // Devolvemos sólo el código encontrado (sin el prefijo "Exp.")
-                return m ? m[1] : '';
+
+            // 👇 AHORA LEE LO QUE ESTÁ EN LA FILA (lo que cambia el popup)
+            valueGetter: (params) => {
+                const v = (params.row.expedienteParte || '').trim();
+                if (!v) return '';
+                return v.startsWith('Exp.') ? v : `Exp. ${v}`;
             },
+
+            // 👇 SE MANTIENE la lógica para cuando EDITAS EN LA GRILLA
             valueSetter: params => {
                 const origen = params.row.origen || '';
                 const raw = (params.value || '').trim();
 
-                // 1) Si no hay patrón válido, quitamos la parte “Exp.” del origen
                 const m = expPattern1.exec(raw) || expPattern2.exec(raw);
                 if (!m) {
                     const resto = origen
@@ -1067,11 +1205,10 @@ const cmpDesc = (a, b) => {
                     return {
                         ...params.row,
                         origen: resto.join(', '),
-                        expedienteParte: ''                 // ← vacío si el usuario lo borró
+                        expedienteParte: ''
                     };
                 }
 
-                // 2) Hay código: normalizamos
                 const code = m[1];
                 const nuevaExp = code.startsWith('Exp.') ? code : `Exp. ${code}`;
                 const resto = origen
@@ -1081,11 +1218,13 @@ const cmpDesc = (a, b) => {
                 return {
                     ...params.row,
                     origen: [nuevaExp, ...resto].filter(Boolean).join(', '),
-                    expedienteParte: nuevaExp             // ← guardamos valor limpio
+                    expedienteParte: nuevaExp
                 };
             },
+
             renderEditCell: renderWithRestore
         },
+
 
         // ---------- Parte "Caso" de origen ----------
         {
@@ -1093,32 +1232,25 @@ const cmpDesc = (a, b) => {
             headerName: 'Caso',
             flex: 1,
             editable: true,
-            valueGetter: params => {
-                const origen = (params.row.origen ?? '').trim()
-                // Si empieza por "Caso", devolvemos todo como caso
-                if (/^Caso/i.test(origen)) {
-                    return origen
-                }
-                const expMatch = origen.match(/Exp\.[^,]*/i)
-                if (expMatch) {
-                    return origen
-                        .slice(expMatch[0].length)
-                        .replace(/^,\s*/, '')
-                        .trim()
-                }
-                return origen.trim()
-            }
-,
+
+            // 👇 AHORA MUESTRA DIRECTO LO QUE GUARDA LA FILA
+            valueGetter: (params) => {
+                const v = (params.row.casoParte || '').trim();
+                if (!v) return '';
+                return v.toUpperCase().startsWith('CASO') ? v : `CASO ${v}`;
+            },
+
+
+            // 👇 SE MANTIENE la lógica para mantener `origen` en sync cuando editas en la grilla
             valueSetter: params => {
                 const origen = params.row.origen ?? '';
 
-                // Partes del origen que NO sean “CASO …”
                 const resto = origen
                     .split(/,\s*/)
                     .filter(p => !/^CASO/i.test(p));
 
                 const rawOriginal = params.value?.trim() || '';
-                const rawSinPref = rawOriginal.replace(/^caso\s*/i, '').trim(); // quita prefijo
+                const rawSinPref = rawOriginal.replace(/^caso\s*/i, '').trim();
 
                 const parts = [];
                 const expPart = origen.match(/Exp\.[^,]*/i)?.[0]?.trim();
@@ -1128,22 +1260,14 @@ const cmpDesc = (a, b) => {
                 return {
                     ...params.row,
                     origen: parts.join(', '),
-                    casoParte: rawSinPref                 // ← guarda el texto (o vacío)
+                    casoParte: rawSinPref
                 };
             },
 
-
-
             renderEditCell: renderWithRestore
         },
-        {
-            field: 'nr_de_exp_completo',
-            headerName: 'Caso Fiscal completo',
-            flex: 1.254,
-            editable: true,
-            renderCell: p => withHistoryButton(p, q => <Typography>{q.value}</Typography>),
-            renderEditCell: p => withHistoryButton(p, renderWithRestore)
-        },
+
+       
         // ----- Fiscalía original, renombrada -----
         {
             field: 'fiscaliaOrigen',
@@ -1317,20 +1441,6 @@ const cmpDesc = (a, b) => {
             }
         }
 ,
-
-
-
-        {
-            field: 'despacho',
-            headerName: 'Desp.',
-            width: 6,
-            type: 'number',
-            headerAlign: 'center',
-            align: 'center',
-            editable: true,
-            renderEditCell: renderWithRestore
-        },
-
 
 
 
@@ -1556,12 +1666,14 @@ const headerDetalle = useMemo(() => {
                 <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, mb: 2 }}>
                     <Typography variant="h6" sx={{ flexShrink: 0 }}>Búsqueda Rápida</Typography>
                     <TextField
+                        inputRef={inputRef}
                         placeholder="Registro PPU"
                         value={query}
                         onChange={handleChangeQuery}
                         size="small"
                         sx={{ flex: 1 }}
                     />
+
 
                     {/* Selector dinámico de columnas extra (no afecta estructura base) */}
                     <Autocomplete
@@ -1587,6 +1699,18 @@ const headerDetalle = useMemo(() => {
                         )}
                         sx={{ minWidth: 280 }}
                     />
+                    {/* ⟵ NUEVO: Botón de escaneo (admin) */}
+                    {isAdmin && (
+                        <Button
+                            variant="outlined"
+                            size="small"
+                            startIcon={<ManageSearchIcon />}
+                            onClick={handleScanCarpeta}
+                            disabled={scanning}
+                        >
+                            {scanning ? 'Escaneando…' : 'Escanear carpeta'}
+                        </Button>
+                    )}
 
                     {isAdmin && (
                         <Button variant="contained" size="small" onClick={handleSync}>
@@ -1695,8 +1819,18 @@ const headerDetalle = useMemo(() => {
                             }}
                             /* ---------- doble-click: comenzar edición ---------- */
                             onCellDoubleClick={(params, event) => {
-                                if (!isAdmin) return;                  // ⬅ bloquea apertura de edición
+                                if (!isAdmin) return;
                                 event.stopPropagation();
+
+                                // ⟵ SI ES LA COLUMNA CASO, ABRIMOS EL DIÁLOGO Y NO ENTRAMOS EN EDICIÓN DE CELDA
+                                if (params.field === 'casoParte') {
+                                    setCasoDialog({
+                                        open: true,
+                                        row: params.row,   // toda la fila actual
+                                    });
+                                    return;
+                                }
+
                                 const mode = apiRef.current.getCellMode(params.id, params.field);
                                 const colDef = apiRef.current.getColumn(params.field);
                                 if (mode === 'view' && colDef.editable) {
@@ -1711,6 +1845,7 @@ const headerDetalle = useMemo(() => {
                                     editing: true,
                                 });
                             }}
+
                             /* ---------- detener edición ---------- */
                             onCellEditStop={(params) => {
                                 apiRef.current.stopCellEditMode({
@@ -2188,7 +2323,55 @@ const headerDetalle = useMemo(() => {
     </DialogActions>
   </Dialog>
 )}
+
+                {/* ======================================================= */}
+                {/*    DIÁLOGO EXTERNO PARA EDITAR CASO (usa <Caso />)       */}
+                {/* ======================================================= */}
+                <Dialog
+                    open={casoDialog.open}
+                    onClose={() => setCasoDialog({ open: false, row: null })}
+                    fullWidth
+                    maxWidth="xl"
+                >
+                    <DialogTitle>
+                        Editar caso — PPU {casoDialog.row?.registro_ppu || ''}
+                    </DialogTitle>
+
+                    <DialogContent dividers sx={{ p: 0 }}>
+                        {casoDialog.row && (
+                            <Caso
+                                // ⟵ datos iniciales para el componente grande
+                                initialData={casoDialog.row}
+
+                                // ⟵ callback cuando el usuario guarda dentro de Caso
+                                onSave={(updatedFields) => {
+                                    // updatedFields debería traer al menos:
+                                    //  casoParte, nr_de_exp_completo, departamento/provincia, fiscaliaOrigen, etc.
+                                    setRows(prev =>
+                                        prev.map(r =>
+                                            r.id === casoDialog.row.id
+                                                ? { ...r, ...updatedFields }
+                                                : r
+                                        )
+                                    );
+
+                                    setCasoDialog({ open: false, row: null });
+                                }}
+
+                                // ⟵ cerrar sin guardar
+                                onCancel={() => setCasoDialog({ open: false, row: null })}
+                            />
+                        )}
+                    </DialogContent>
+
+                    <DialogActions>
+                        <Button onClick={() => setCasoDialog({ open: false, row: null })}>
+                            Cerrar
+                        </Button>
+                    </DialogActions>
+                </Dialog>
             </Box>
+   
         </Modal>
     );
 }

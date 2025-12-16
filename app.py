@@ -75,6 +75,7 @@ CORS(
 from backend.modules.ingresos.ingresos import ingresos_bp
 app.register_blueprint(ingresos_bp, url_prefix="/api")
 
+
 from backend.core import (
     # Auth/decorators
     login_required, role_required,
