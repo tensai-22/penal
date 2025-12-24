@@ -554,7 +554,10 @@ def upload_file():
         })
 
     # 3. Agrupar por registro PPU
-    registro_ppu_re = re.compile(r'(D-\d{1,4}-\d{4}(?:-[A-Z])?|LEG-\d{1,4}-\d{4}(?:-[A-Z])?|L\.?\s?\d{1,4}-\d{4}(?:-[A-Z])?)', re.IGNORECASE)
+    registro_ppu_re = re.compile(
+        r'(D-\d{1,4}-\d{4}(?:-[A-Z])?|LEG-\d{1,4}-\d{4}(?:-[A-Z])?|L\.?\s?\d{1,4}-\d{4}(?:-[A-Z])?)',
+        re.IGNORECASE
+    )
 
     grouped = {}
     for info in pdf_infos:
@@ -566,7 +569,6 @@ def upload_file():
     # 4. Clustering solo dentro de cada grupo PPU
     clusters = []
     for ppu, infos in grouped.items():
-        # Si solo hay uno, lo metemos directamente como un cluster
         if len(infos) == 1:
             clusters.append([infos[0]])
             continue
@@ -576,8 +578,8 @@ def upload_file():
             placed = False
             for cluster in local_clusters:
                 ref = cluster[0]
-                # decidir si usamos trimmed
                 use_trimmed = (info['pages'] > 50) or (ref['pages'] > 50)
+
                 if use_trimmed:
                     t1 = extract_text_pages(info['data'], info['pages'], trimmed=True)
                     t2 = extract_text_pages(ref['data'], ref['pages'], trimmed=True)
@@ -613,64 +615,97 @@ def upload_file():
 
     # 6. Guardar, leer metadato y precargar fecha_notificación
     resultados = []
-    cnx2 = mysql.connector.connect(
-        host='localhost', database='monitoreo_descargas_sinoe',
-        user='root', password='Manuel22'
-    )
-    cursor2 = cnx2.cursor()
-    for info in seleccionados:
-        filename = info['name']
-        save_path = os.path.abspath(os.path.join(upload_folder_abs, filename))
-        app.logger.debug("Ruta de guardado calculada: %s", save_path)
 
-        if not save_path.startswith(upload_folder_abs):
-            app.logger.warning("Ruta inválida (se salta): %s", save_path)
-            continue
+    cnx2 = None
+    cursor2 = None
+    try:
+        cnx2 = mysql.connector.connect(
+            host='localhost',
+            database='monitoreo_descargas_sinoe',
+            user='root',
+            password='Manuel22'
+        )
+        # ✅ buffered=True te blinda ante “Unread result found” si en el futuro alguien mete otro SELECT sin LIMIT
+        cursor2 = cnx2.cursor(buffered=True)
 
-        # 6.a Guardar el PDF
+        for info in seleccionados:
+            filename = info['name']
+            save_path = os.path.abspath(os.path.join(upload_folder_abs, filename))
+            app.logger.debug("Ruta de guardado calculada: %s", save_path)
+
+            # ✅ check robusto de path (evita trucos con prefijos)
+            try:
+                if os.path.commonpath([save_path, upload_folder_abs]) != upload_folder_abs:
+                    app.logger.warning("Ruta inválida (se salta): %s", save_path)
+                    continue
+            except Exception:
+                app.logger.warning("Ruta inválida (commonpath falló) (se salta): %s", save_path)
+                continue
+
+            # 6.a Guardar el PDF
+            try:
+                with open(save_path, 'wb') as out:
+                    out.write(info['data'])
+                app.logger.info("Guardado exitoso: %s", filename)
+            except Exception as e:
+                app.logger.error("Error al guardar %s: %s", filename, e)
+                continue
+
+            # 6.b Leer SHA-256 desde el metadato '/HashSHA256'
+            hash_sha = read_hash_from_pdf(save_path)
+            if hash_sha:
+                app.logger.info("Leído SHA desde metadatos de %s: %s", filename, hash_sha)
+            else:
+                app.logger.warning("Metadato /HashSHA256 no encontrado en %s; omito cálculo", filename)
+
+            # 6.c Buscar fecha_notificación en conteo_exp
+            fecha_notif = ""
+            if hash_sha:
+                cursor2.execute(
+                    "SELECT fecha_notificacion FROM conteo_exp "
+                    "WHERE codigo_unico = %s "
+                    "AND fecha_notificacion REGEXP %s "
+                    "ORDER BY fecha_notificacion DESC "
+                    "LIMIT 1",
+                    (hash_sha, r'^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+                )
+                row = cursor2.fetchone()
+                if row and row[0]:
+                    fecha_notif = row[0].isoformat()
+                    app.logger.debug("Fecha notificación para %s: %s", hash_sha, fecha_notif)
+
+            resultados.append({
+                'filename': filename,
+                'hash_sha': hash_sha or "",
+                'fecha_notificacion': fecha_notif
+            })
+
+    except Exception as e:
+        app.logger.exception("Fallo en /upload (DB precarga fecha penal): %s", e)
+        return jsonify({
+            "error": "Error interno en /upload",
+            "detail": str(e)
+        }), 500
+
+    finally:
+        # ✅ cierres SIEMPRE al final, una sola vez
         try:
-            with open(save_path, 'wb') as out:
-                out.write(info['data'])
-            app.logger.info("Guardado exitoso: %s", filename)
-        except Exception as e:
-            app.logger.error("Error al guardar %s: %s", filename, e)
-            continue
+            if cursor2 is not None:
+                cursor2.close()
+        except Exception:
+            pass
 
-        # 6.b Leer SHA-256 desde el metadato '/HashSHA256'
-        hash_sha = read_hash_from_pdf(save_path)
-        if hash_sha:
-            app.logger.info("Leído SHA desde metadatos de %s: %s", filename, hash_sha)
-        else:
-            app.logger.warning("Metadato /HashSHA256 no encontrado en %s; omito cálculo", filename)
-
-        # 6.c Buscar fecha_notificación en conteo_exp
-        fecha_notif = ""
-        if hash_sha:
-            cursor2.execute(
-                "SELECT fecha_notificacion FROM conteo_exp "
-                "WHERE codigo_unico = %s AND fecha_notificacion REGEXP %s",
-                (hash_sha, r'^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
-            )
-            row = cursor2.fetchone()
-            if row and row[0]:
-                fecha_notif = row[0].isoformat()
-                app.logger.debug("Fecha notificación para %s: %s", hash_sha, fecha_notif)
-
-        resultados.append({
-            'filename': filename,
-            'hash_sha': hash_sha or "",
-            'fecha_notificacion': fecha_notif
-        })
-
-    cursor2.close()
-    cnx2.close()
+        try:
+            if cnx2 is not None and cnx2.is_connected():
+                cnx2.close()
+        except Exception:
+            pass
 
     app.logger.info("=== Fin de /upload → resultados: %s ===", resultados)
     return jsonify({
         "message": "Carga completada",
         "archivos": resultados
     }), 200
-########### PRECARGA FECHA PENAL
 
 
 @app.route('/api/eliminar_pdfs_por_registro', methods=['POST'])
