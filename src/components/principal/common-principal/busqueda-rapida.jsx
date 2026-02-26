@@ -66,6 +66,12 @@ export default function BusquedaRapida({ open, onClose, registro_ppu = "" }) {
     const [origenFilter, setOrigen] = useState('');
     const [deptoFilter, setDepto] = useState('');
 
+    // ✅ NUEVO: modo de vista
+    const [viewMode, setViewMode] = useState('db'); // 'db' | 'ruta'
+
+    // modo ruta
+    const [rutaLoading, setRutaLoading] = useState(false);
+    const [rutaSearchState, setRutaSearchState] = useState({}); // id -> { input, options, loading }
     /* ✅ NUEVO: ref + seed/focus al abrir */
     const inputRef = useRef(null);
 
@@ -140,17 +146,18 @@ const [viewerMeta, setViewerMeta] = useState(null);
 
     // 1) Nuevo handler en mousedown: cierra la edición previa al instante y mueve foco
     const handleCellMouseDown = (params, event) => {
+        
+        if (params.field === 'buscarFila') return;
+
         event.stopPropagation();
 
         if (editState.editing) {
-            // confirmamos la edición pendiente pasando el nuevo valor
             apiRef.current.commitCellChange({
                 id: editState.cell.id,
                 field: editState.cell.field,
                 value: editState.value
             });
 
-            // 2) cerramos la edición sin ignorar modificaciones
             apiRef.current.stopCellEditMode({
                 id: editState.cell.id,
                 field: editState.cell.field,
@@ -162,8 +169,14 @@ const [viewerMeta, setViewerMeta] = useState(null);
             id: params.id,
             field: params.field
         });
-        setEditState({ cell: { id: params.id, field: params.field }, value: params.value ?? '', editing: false });
+
+        setEditState({
+            cell: { id: params.id, field: params.field },
+            value: params.value ?? '',
+            editing: false
+        });
     };
+
 
     // 2) Doble click: inicia la edición de la celda
     const handleCellDoubleClick = (params) => {
@@ -357,57 +370,329 @@ const [viewerMeta, setViewerMeta] = useState(null);
 
 
     useEffect(() => {
+        if (viewMode !== 'db') return;  // ✅ clave
         debouncedSearch(query, origenFilter, deptoFilter);
-    }, [query, origenFilter, deptoFilter, debouncedSearch]);
+    }, [query, origenFilter, deptoFilter, debouncedSearch, viewMode]);
+
+
+
+
+    const normalizeRowsFromRutaScan = (dataArray) => {
+        return (dataArray || []).map((r, i) => ({
+            id: i,
+            // metadata del PDF
+            ruta_pdf: r.ruta_pdf,
+            nombre_original: r.nombre_original,
+            fecha_carpeta: r.fecha_carpeta,
+            abogado_guess: r.abogado_guess,
+
+            // campos del datapenal (vacíos hasta que elijas match)
+            abogado: '',
+            registro_ppu: '',
+            denunciado: '',
+            origen: '',
+            nr_de_exp_completo: '',
+            fiscaliaOrigen: '',
+            departamento: '',
+            juzgado: '',
+            delito: '',
+            e_situacional: '',
+            informeJuridico: '',
+            item: '',
+            fechaIngreso: '',
+            etiqueta: '',
+            fechaDeArchivo: '',
+            razonArchivo: '',
+
+            // derivados que usa tu grilla
+            expedienteParte: '',
+            casoParte: '',
+            despacho: '',
+            _historyFields: []
+        }));
+    };
+
+    const handleBuscarPorRuta = async () => {
+        try {
+            setRutaLoading(true);
+
+            // reset general
+            setRows([]);
+            setEditState({ cell: null, value: '', editing: false });
+            originalJuzgado.current = {};
+            originalValues.current = {};
+            originalDeps.current = {};
+
+            const { data } = await axios.post('/api/busqueda_ruta_scan', { limit: 10 });
+
+            const tmp = normalizeRowsFromRutaScan(Array.isArray(data) ? data : []);
+            setRows(tmp);
+            setViewMode('ruta');
+        } catch (e) {
+            console.error(e);
+            alert('No se pudo escanear las rutas.');
+        } finally {
+            setRutaLoading(false);
+        }
+    };
+
+    const handleVolverABusqueda = () => {
+        setViewMode('db');
+        resetBusqueda();
+    };
+    const debouncedBuscarFila = useMemo(
+        () => debounce(async (rowId, q) => {
+            const qq = String(q || '').trim();
+            if (!qq) {
+                setRutaSearchState(p => ({ ...p, [rowId]: { input: qq, options: [], loading: false } }));
+                return;
+            }
+            try {
+                setRutaSearchState(p => ({ ...p, [rowId]: { ...(p[rowId] || {}), loading: true } }));
+                const { data } = await axios.get('/api/busqueda_rapida', { params: { q: qq } });
+                const list = Array.isArray(data) ? data : (data?.rows || []);
+                setRutaSearchState(p => ({ ...p, [rowId]: { input: qq, options: list, loading: false } }));
+            } catch {
+                setRutaSearchState(p => ({ ...p, [rowId]: { input: qq, options: [], loading: false } }));
+            }
+        }, 300),
+        []
+    );
+
+    const applyBackendRowIntoRutaRow = (rowId, dbRow) => {
+        // reutiliza tu misma lógica de normalizeRowsFromBackend pero para UNA FILA
+        const origenText = dbRow.origen ?? '';
+        const startsWithCaso = /^Caso/i.test(origenText.trim());
+        const expMatch = startsWithCaso ? null : origenText.match(/Exp\.[^,]*/i);
+
+        const expedienteParte = expMatch ? expMatch[0].trim() : '';
+        const resto = origenText.split(/,\s*/).filter(p => !/^Exp\./i.test(p));
+        const casoParte = expMatch ? resto.join(', ').trim() : origenText.trim();
+
+        let despacho = '';
+        let fiscaliaLimpia = dbRow.fiscaliaOrigen ?? '';
+        const dm = fiscaliaLimpia.match(/\s*-\s*(\d+)\s+DESPACHO$/i);
+        if (dm) {
+            despacho = dm[1];
+            fiscaliaLimpia = fiscaliaLimpia.replace(/\s*-\s*\d+\s+DESPACHO$/i, '').trim();
+        }
+
+        const patch = {
+            ...dbRow,
+            fiscaliaOrigen: fiscaliaLimpia,
+            expedienteParte,
+            casoParte,
+            despacho,
+        };
+
+        // set en grid + set en state
+        apiRef.current.updateRows([{ id: rowId, ...patch }]);
+        setRows(prev => prev.map(r => (r.id === rowId ? { ...r, ...patch } : r)));
+
+        // muy importante: “originalValues” para que recién marque amarillo si editas luego
+        Object.keys(patch).forEach((f) => {
+            originalValues.current[`${rowId}-${f}`] = patch[f];
+        });
+        originalDeps.current[`${rowId}-fiscaliaOrigen`] = dbRow.fiscaliaOrigen;
+        originalDeps.current[`${rowId}-departamento`] = dbRow.departamento;
+        originalJuzgado.current[rowId] = dbRow.juzgado ?? '';
+    };
+
+    // ✅ helper: deja que Autocomplete procese la tecla y luego bloquea al DataGrid
+    const swallowGridKeys = (handler) => (e) => {
+        // 1) primero que el Autocomplete haga su navegación (flechas, etc.)
+        if (typeof handler === 'function') handler(e);
+
+        // 2) luego corta al DataGrid
+        e.stopPropagation();
+        e.defaultMuiPrevented = true; // 🔥 clave en MUI X
+
+        // extra “por si acaso” (algunas builds lo necesitan)
+        if (e.nativeEvent?.stopImmediatePropagation) {
+            e.nativeEvent.stopImmediatePropagation();
+        }
+    };
+
+    const renderBuscarFila = (params) => {
+        const rowId = params.id;
+        const st = rutaSearchState[rowId] || { input: '', options: [], loading: false };
+
+        return (
+            <Box
+                sx={{ width: '100%' }}
+                // ✅ captura teclado ANTES que el grid lo procese
+                onKeyDownCapture={(e) => {
+                    e.stopPropagation();
+                    e.defaultMuiPrevented = true;
+                }}
+                onKeyUpCapture={(e) => {
+                    e.stopPropagation();
+                    e.defaultMuiPrevented = true;
+                }}
+                // ✅ evita que clicks en la lista afecten selección/foco del grid
+                onMouseDown={(e) => e.stopPropagation()}
+                onClick={(e) => e.stopPropagation()}
+            >
+                <Autocomplete
+                    size="small"
+                    fullWidth
+                    options={st.options || []}
+                    loading={!!st.loading}
+                    getOptionLabel={(opt) => {
+                        const ppu = opt?.registro_ppu ?? '';
+                        const abo = opt?.abogado ?? '';
+                        const den = opt?.denunciado ?? '';
+                        return `${ppu} — ${abo} — ${den}`.trim();
+                    }}
+                    isOptionEqualToValue={(a, b) => (a?.registro_ppu ?? '') === (b?.registro_ppu ?? '')}
+                    inputValue={st.input}
+                    onInputChange={(_, v, reason) => {
+                        if (reason !== 'input') return;
+                        setRutaSearchState((p) => ({ ...p, [rowId]: { ...(p[rowId] || {}), input: v } }));
+                        debouncedBuscarFila(rowId, v);
+                    }}
+                    onChange={(_, sel) => {
+                        if (!sel) return;
+                        applyBackendRowIntoRutaRow(rowId, sel);
+                    }}
+                    PopperProps={{
+                        sx: { zIndex: 4000 }, // por si tu modal/grilla está peleando z-index
+                        onMouseDown: (e) => {
+                            // 🔥 evita que el grid cambie foco y mate el click del option
+                            e.preventDefault();
+                            e.stopPropagation();
+                            e.defaultMuiPrevented = true;
+                            e.nativeEvent?.stopImmediatePropagation?.();
+                        },
+                        onClick: (e) => {
+                            e.stopPropagation();
+                            e.defaultMuiPrevented = true;
+                        }
+                    }}
+                    ListboxProps={{
+                        onMouseDown: (e) => {
+                            // ✅ CLAVE: sin esto, se pierde foco y no se seleccionan los options
+                            e.preventDefault();
+                            e.stopPropagation();
+                            e.defaultMuiPrevented = true;
+                            e.nativeEvent?.stopImmediatePropagation?.();
+                        },
+                        onClick: (e) => {
+                            e.stopPropagation();
+                            e.defaultMuiPrevented = true;
+                        },
+                    }}
+                    renderInput={(p) => (
+                        <TextField
+                            {...p}
+                            placeholder="Buscar en BD (PPU/abogado/denunciado…)"
+                            inputProps={{
+                                ...p.inputProps,
+                                onKeyDown: swallowGridKeys(p.inputProps?.onKeyDown),
+                                onKeyUp: swallowGridKeys(p.inputProps?.onKeyUp),
+                            }}
+                            onMouseDown={(e) => {
+                                e.stopPropagation();
+                                e.defaultMuiPrevented = true;
+                            }}
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                e.defaultMuiPrevented = true;
+                            }}
+                        />
+                    )}
+                />
+
+            </Box>
+        );
+    };
+
+
 
     /* 1️⃣  clave memoizada que SÓLO cambia cuando cambia la lista de PPUs */
-    const rowKey = useMemo(() =>
-        rows.map(r => r.registro_ppu).join('|'),
-        [rows]
-    );
+    /* 1️⃣  clave memoizada: SOLO PPUs reales (sin ''), y sin duplicados */
+    const rowKey = useMemo(() => {
+        const ppus = rows
+            .map(r => String(r?.registro_ppu ?? '').trim())
+            .filter(Boolean);
+
+        return Array.from(new Set(ppus)).join('|');
+    }, [rows]);
+
 
     useEffect(() => {
         if (!rows.length) return;
 
-        const ppus = rows.map(r => r.registro_ppu);
+        // ✅ SOLO PPUs reales
+        const ppus = rows
+            .map(r => String(r?.registro_ppu ?? '').trim())
+            .filter(Boolean);
 
-        axios.post('/api/busqueda_rapida_history_available_bulk', ppus)
-            .then(async ({ data }) => {
-                setHistoryAvail(data);
+        // En modo ruta (antes de elegir match) esto suele venir vacío: no dispares request
+        if (!ppus.length) return;
 
-                const initProg = {};
-                const initCache = {};
+        const uniq = Array.from(new Set(ppus));
+        let cancelled = false;
 
-                Object.entries(data).forEach(([ppu, fields]) => {
-                    fields.forEach(field => {
-                        const key = `${ppu}|${field}`;
-                        if (historyProgress[key] === undefined) initProg[key] = 0;   // 0 %
-                        if (historyData[key] === undefined) initCache[key] = undefined;
+        axios
+            .post('/api/busqueda_rapida_history_available_bulk', uniq)
+            .then(({ data }) => {
+                if (cancelled) return;
+
+                const avail = data || {};
+                setHistoryAvail(avail);
+
+                // ✅ NO uses historyProgress/historyData del closure (viejos).
+                // Usa el prev real.
+                setHistoryProgress(prev => {
+                    const next = { ...prev };
+                    Object.entries(avail).forEach(([ppu, fields]) => {
+                        (fields || []).forEach(field => {
+                            const k = `${ppu}|${field}`;
+                            if (next[k] === undefined) next[k] = 0;
+                        });
                     });
+                    return next;
                 });
 
-                if (Object.keys(initProg).length) setHistoryProgress(p => ({ ...p, ...initProg }));
-                if (Object.keys(initCache).length) setHistoryData(p => ({ ...p, ...initCache }));
+                setHistoryData(prev => {
+                    const next = { ...prev };
+                    Object.entries(avail).forEach(([ppu, fields]) => {
+                        (fields || []).forEach(field => {
+                            const k = `${ppu}|${field}`;
+                            if (next[k] === undefined) next[k] = undefined;
+                        });
+                    });
+                    return next;
+                });
 
-                /* 2️⃣  sólo actualiza la fila si cambió _historyFields */
+                // ✅ Solo actualiza filas si cambió _historyFields (mantiene referencia si no)
                 setRows(rs => {
                     let changed = false;
                     const next = rs.map(row => {
-                        const fresh = data[row.registro_ppu] || [];
-                        const same =
-                            fresh.length === row._historyFields.length &&
-                            fresh.every((v, i) => v === row._historyFields[i]);
+                        const ppu = String(row?.registro_ppu ?? '').trim();
+                        const fresh = avail[ppu] || [];
+                        const prevFields = row._historyFields || [];
 
-                        if (same) return row;        // mantiene referencia → no dispara efecto
+                        const same =
+                            fresh.length === prevFields.length &&
+                            fresh.every((v, i) => v === prevFields[i]);
+
+                        if (same) return row;
                         changed = true;
                         return { ...row, _historyFields: fresh };
                     });
+
                     return changed ? next : rs;
                 });
             })
             .catch(() => { /* silenciar error si falla */ });
-    }, [rowKey]);     
-  
+
+        return () => {
+            cancelled = true;
+        };
+    }, [rowKey]);
+
 
     // Handlers de filtros
     const handleChangeQuery = e => setQuery(e.target.value);
@@ -507,19 +792,129 @@ const revokeLastBlobUrl = () => {
 
 /* Abre visor con una RUTA (UNC o absoluta de servidor) */
 /* helpers visor PDF */
-const openPdfFromRuta = (ruta, meta = null) => {
-  const url = `${API_BASE_URL}/open_pdf_by_ruta?ruta=${encodeURIComponent(ruta)}`; // ⟵ URL ABSOLUTA AL BACKEND
-  setPdfUrl(url);
-  setViewerMeta(meta || null);
-  setShowPdfModal(true);
+    /* Abre visor con una RUTA TEMPORAL (endpoint aislado) */
+    // ✅ Ventana externa reutilizable (solo 1)
+    const pdfExternalWinRef = useRef(null);
+    const openPdfFromRuta = (ruta, meta = null) => {
+        const url = `${API_BASE_URL}/open_pdf_tmp?ruta=${encodeURIComponent(ruta)}`; // ✅ ENDPOINT NUEVO
+        setPdfUrl(url);
+        setViewerMeta(meta || null);
+        setShowPdfModal(true);
 
-  if (isChromeBrowser()) {
-    if (loadTimerRef.current) clearTimeout(loadTimerRef.current);
-    loadTimerRef.current = setTimeout(() => setLoadingPdf(true), 700);
-  } else {
-    setLoadingPdf(false);
-  }
-};
+        if (isChromeBrowser()) {
+            if (loadTimerRef.current) clearTimeout(loadTimerRef.current);
+            loadTimerRef.current = setTimeout(() => setLoadingPdf(true), 700);
+        } else {
+            setLoadingPdf(false);
+        }
+    };
+
+    const ensurePdfExternalWindow = () => {
+        let w = pdfExternalWinRef.current;
+
+        // si no existe o se cerró, la creamos
+        if (!w || w.closed) {
+            // OJO: NO uses 'noopener' si quieres reutilizar la misma ventana (pierdes el ref)
+            w = window.open(
+                '',
+                'PPU_PDF_VIEWER',
+                'width=1200,height=820,resizable=yes,scrollbars=yes'
+            );
+
+            if (!w) {
+                alert('El navegador bloqueó la ventana emergente del visor PDF.');
+                return null;
+            }
+
+            pdfExternalWinRef.current = w;
+
+            // construye un visor simple (cabecera + iframe)
+            w.document.open();
+            w.document.write(`
+      <!doctype html>
+      <html>
+      <head>
+        <meta charset="utf-8" />
+        <title>Visor PDF (Ruta)</title>
+        <style>
+          html, body { height: 100%; margin: 0; font-family: Arial, sans-serif; }
+          .topbar {
+            display:flex; gap:12px; align-items:center;
+            padding:10px 12px; background:#0D47A1; color:#fff;
+          }
+          .pill {
+            background: rgba(255,255,255,.14);
+            padding: 6px 10px; border-radius: 10px; font-size: 12px;
+            max-width: 380px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+          }
+          .wrap { height: calc(100% - 52px); }
+          iframe { width:100%; height:100%; border:0; }
+          .btn {
+            margin-left:auto; background:#fff; color:#0D47A1; border:0;
+            padding:6px 10px; border-radius:10px; cursor:pointer; font-weight:700;
+          }
+        </style>
+      </head>
+      <body>
+        <div class="topbar">
+          <div class="pill" id="m_abogado">Abogado: —</div>
+          <div class="pill" id="m_ppu">PPU: —</div>
+          <div class="pill" id="m_origen">Expediente: —</div>
+          <div class="pill" id="m_fecha">Fecha: —</div>
+          <button class="btn" id="btn_focus">Enfocar</button>
+        </div>
+        <div class="wrap">
+          <iframe id="pdf_frame" title="pdf"></iframe>
+        </div>
+
+        <script>
+          // botón enfocar
+          document.getElementById('btn_focus').addEventListener('click', () => window.focus());
+        </script>
+      </body>
+      </html>
+    `);
+            w.document.close();
+        }
+
+        return w;
+    };
+
+    // ✅ Abre PDF del modo RUTA en ventana externa (reutilizable)
+    const openPdfFromRutaExternal = (ruta, meta = null) => {
+        const url = `${API_BASE_URL}/open_pdf_tmp?ruta=${encodeURIComponent(ruta)}`;
+        const w = ensurePdfExternalWindow();
+        if (!w) return;
+
+        // actualiza metadatos
+        const m = meta || {};
+        const setTxt = (id, txt) => {
+            const el = w.document.getElementById(id);
+            if (el) el.textContent = txt;
+        };
+
+        setTxt('m_abogado', `Abogado: ${m.abogado ?? '—'}`);
+        setTxt('m_ppu', `PPU: ${m.registro_ppu ?? '—'}`);
+        setTxt('m_origen', `Expediente: ${m.origen ?? '—'}`);
+        setTxt('m_fecha', `Fecha: ${m.fecha_hora ?? '—'}`);
+
+        // cambia el PDF (sin abrir más ventanas)
+        const iframe = w.document.getElementById('pdf_frame');
+        if (iframe) iframe.src = url;
+
+        w.focus();
+    };
+
+    // (Opcional) limpieza suave al desmontar: no la cierro, solo suelto el ref
+    useEffect(() => {
+        return () => {
+            if (pdfExternalWinRef.current && pdfExternalWinRef.current.closed) {
+                pdfExternalWinRef.current = null;
+            }
+        };
+    }, []);
+
+
 
 
 const closePdfViewer = () => {
@@ -836,6 +1231,9 @@ const cmpDesc = (a, b) => {
 
         });
 
+
+      
+
         /* 3) POST al backend + refresco de historial para los PPUs realmente modificados */
         try {
             const { data: resp } = await axios.post('/api/busqueda_rapida_sync', payload);
@@ -899,6 +1297,101 @@ const cmpDesc = (a, b) => {
         } catch (error) {
             console.error('Error al sincronizar cambios:', error);
             alert('Error al sincronizar cambios');
+        }
+    };
+
+    const handleRutaSync = async () => {
+        // 0) cerrar edición si quedó algo editándose
+        if (editState.editing && editState.cell) {
+            const { id, field } = editState.cell;
+            apiRef.current.stopCellEditMode({ id, field, ignoreModifications: false });
+            await new Promise((r) => setTimeout(r, 0));
+        }
+
+        const rowModels = Array.from(apiRef.current.getRowModels().values());
+
+        // ✅ SOLO filas que ya tienen PPU (si no, el backend las va a omitir)
+        const payload = rowModels
+            .filter(r => String(r?.registro_ppu ?? '').trim())
+            .map((row) => {
+                const exp = (row.expedienteParte ?? '').trim();
+                const casoRaw = (row.casoParte ?? '').trim();
+                const teniaCasoEnOrigen = /(^|,\s*)CASO\s/i.test((row.origen ?? '').trim());
+                const casoForSync = casoRaw
+                    ? (teniaCasoEnOrigen
+                        ? (/^caso\s/i.test(casoRaw) ? casoRaw : `CASO ${casoRaw}`)
+                        : casoRaw)
+                    : '';
+
+                let origen = '';
+                if (exp && casoForSync) origen = `${exp}, ${casoForSync}`;
+                else if (exp) origen = exp;
+                else if (casoForSync) origen = casoForSync;
+
+                const numDespacho = parseInt(row.despacho ?? 0, 10);
+                const fiscaliaSync = numDespacho > 0
+                    ? `${row.fiscaliaOrigen} - ${numDespacho} DESPACHO`
+                    : (row.fiscaliaOrigen ?? '');
+
+                return {
+                    // 👇 claves especiales del modo ruta
+                    rutaPdf: row.ruta_pdf ?? '',
+                    nombreOriginal: row.nombre_original ?? '',
+
+                    // 👇 mismas claves que tu sync normal
+                    registroPpu: row.registro_ppu ?? '',
+                    abogado: row.abogado ?? '',
+                    denunciado: row.denunciado ?? '',
+                    origen,
+                    juzgado: row.juzgado ?? '',
+                    departamento: row.departamento ?? '',
+                    nrDeExpCompleto: row.nr_de_exp_completo ?? '',
+                    fiscaliaOrigen: fiscaliaSync,
+                    delito: row.delito ?? '',
+                    eSituacional: row.e_situacional ?? '',
+                    etiqueta: row.etiqueta ?? '',
+                    informeJuridico: row.informeJuridico ?? '',
+                    item: row.item ?? '',
+                    fechaIngreso: row.fechaIngreso ?? null,
+                    razonArchivo: row.razonArchivo ?? '',
+                };
+            });
+
+        try {
+            const { data: resp } = await axios.post('/api/busqueda_ruta_sync', payload);
+
+            const upd = resp?.updated || [];
+            const ren = resp?.renamed || [];
+            const errs = resp?.errors || [];
+
+            alert(`Ruta Sync OK — Actualizados: ${upd.length} | Renombrados: ${ren.length} | Errores: ${errs.length}`);
+            if (errs.length) console.warn('Errores ruta_sync:', errs);
+
+            // ✅ si renombró, actualiza ruta_pdf y nombre_original en pantalla
+            if (Array.isArray(ren) && ren.length) {
+                const map = new Map(ren.map(x => [x.from, x.to]));
+                setRows(prev => prev.map(r => {
+                    const to = map.get(r.ruta_pdf);
+                    if (!to) return r;
+                    const name = String(to).split(/\\|\//).pop();
+                    return { ...r, ruta_pdf: to, nombre_original: name };
+                }));
+            }
+
+            // ✅ marcar nuevos "originales" para quitar resaltado amarillo
+            rowModels.forEach((row) => {
+                Object.keys(row).forEach((f) => {
+                    originalValues.current[`${row.id}-${f}`] = row[f];
+                });
+                originalDeps.current[`${row.id}-fiscaliaOrigen`] = row.fiscaliaOrigen;
+                originalDeps.current[`${row.id}-departamento`] = row.departamento;
+                originalJuzgado.current[row.id] = row.juzgado;
+            });
+            setRows(prev => prev.map(r => ({ ...r })));
+
+        } catch (e) {
+            console.error('Error ruta_sync:', e);
+            alert('Error al sincronizar (modo ruta)');
         }
     };
 
@@ -1094,7 +1587,7 @@ const cmpDesc = (a, b) => {
     // Luego, tu definición completa de columnas:
     // Dentro de BusquedaRapida, reemplaza tu definición de `columns` por esta:
     // Columnas con filtros inline
-    const columns = useMemo(() => [
+    const columnsDb = useMemo(() => [
 
 
 
@@ -1497,7 +1990,75 @@ const cmpDesc = (a, b) => {
   ...EXTRA_COLUMNS
     ], [deptoFilter, fiscOptions]);
 
+    const columnsRuta = useMemo(() => [
+        {
+            field: 'pdf',
+            headerName: 'PDF',
+            width: 280,          // 👈 ahora muestra nombre, necesita más ancho
+            sortable: false,
+            renderCell: (p) => {
+                const fileName =
+                    String(p.row?.nombre_original ?? '').trim() ||
+                    String(p.row?.ruta_pdf ?? '').split(/\\|\//).pop() ||
+                    'PDF';
 
+                const handleOpen = (e) => {
+                    e.stopPropagation();
+                    openPdfFromRutaExternal(p.row.ruta_pdf, {
+                        abogado: p.row.abogado || p.row.abogado_guess || 'N.A',
+                        registro_ppu: p.row.registro_ppu || 'N.A',
+                        origen: p.row.origen || 'N.A',
+                        fecha_hora: p.row.fecha_carpeta || 'N.A',
+                    });
+                };
+
+                return (
+                    <Button
+                        variant="text"
+                        size="small"
+                        onClick={handleOpen}
+                        onDoubleClick={handleOpen}
+                        sx={{
+                            p: 0,
+                            minWidth: 0,
+                            textTransform: 'none',
+                            justifyContent: 'flex-start',
+                            color: 'primary.main',          // 👈 azul tipo link
+                            textDecoration: 'underline',    // 👈 subrayado
+                            fontWeight: 600,
+                            maxWidth: '100%',
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                        }}
+                        title={fileName}
+                    >
+                        {fileName}
+                    </Button>
+                );
+            }
+        },
+
+        {
+            field: 'buscarFila',
+            headerName: 'Buscar (por fila)',
+            width: 320,          // 👈 MÁS ANGOSTA (antes flex 1.2 que se expandía demasiado)
+            sortable: false,
+            renderCell: renderBuscarFila
+        },
+
+        // Reusa tus columnas “core” (ya llenas cuando seleccionas match):
+        { field: 'registro_ppu', headerName: 'PPU', width: 130 },
+        { field: 'abogado', headerName: 'Abogado', width: 180 },
+        { field: 'expedienteParte', headerName: 'Expediente', width: 180 },
+        { field: 'casoParte', headerName: 'Caso', width: 180 },
+        { field: 'juzgado', headerName: 'Juzgado', width: 180 },
+        { field: 'fiscaliaOrigen', headerName: 'Fiscalía origen', width: 220 },
+        { field: 'departamento', headerName: 'Depto.', width: 140 },
+    ], [rutaSearchState]);
+
+
+    const columns = viewMode === 'ruta' ? columnsRuta : columnsDb;
 
 
     const closeHist = () =>
@@ -1664,7 +2225,9 @@ const headerDetalle = useMemo(() => {
         <Modal open={open} onClose={handleClose}>
             <Box sx={fullScreenModalStyle} ref={containerRef} tabIndex={0}>
                 <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, mb: 2 }}>
-                    <Typography variant="h6" sx={{ flexShrink: 0 }}>Búsqueda Rápida</Typography>
+                    <Typography variant="h6" sx={{ flexShrink: 0 }}>
+                        {viewMode === 'ruta' ? 'Búsqueda por ruta (temporal)' : 'Búsqueda Rápida'}
+                    </Typography>
                     <TextField
                         inputRef={inputRef}
                         placeholder="Registro PPU"
@@ -1712,11 +2275,41 @@ const headerDetalle = useMemo(() => {
                         </Button>
                     )}
 
-                    {isAdmin && (
-                        <Button variant="contained" size="small" onClick={handleSync}>
-                            Sincronizar
+                    {/* ✅ NUEVO: activar modo ruta */}
+                    {isAdmin && viewMode === 'db' && (
+                        <Button
+                            variant="outlined"
+                            size="small"
+                            onClick={handleBuscarPorRuta}
+                            disabled={rutaLoading}
+                        >
+                            {rutaLoading ? 'Escaneando rutas…' : 'Buscar por ruta'}
                         </Button>
                     )}
+
+                    {/* ✅ NUEVO: volver a BD */}
+                    {viewMode === 'ruta' && (
+                        <Button
+                            variant="outlined"
+                            size="small"
+                            onClick={handleVolverABusqueda}
+                        >
+                            Volver a BD
+                        </Button>
+                    )}
+
+                    {/* ✅ Sincronizar: cambia según modo */}
+                    {isAdmin && (
+                        <Button
+                            variant="contained"
+                            size="small"
+                            onClick={viewMode === "ruta" ? handleRutaSync : handleSync}
+                        >
+                            Sincronizar
+                        </Button>
+
+                    )}
+
                     <IconButton size="small" onClick={handleClose}><CloseIcon /></IconButton>
                 </Box>
 

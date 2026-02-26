@@ -444,3 +444,433 @@ def busqueda_rapida_sync():
 # -------------------------------------------------------------------- #
 # ---------------------------------MODO BUSQUEDA ----------------------- #
 # -------------------------------------------------------------------- #
+
+
+import re
+import unicodedata
+
+# =========================
+#  BUSCAR POR RUTA (SCAN)
+# =========================
+
+RUTA_SCAN_ROOTS = [
+    r"\\jgranda\NOTIFICACIONES PENALES  (ABOGADOS)\NOTIFICACIONES PENALES AÑO 2023",
+    r"\\jgranda\NOTIFICACIONES PENALES  (ABOGADOS)\NOTIFICACIONES PENALES AÑO 2024",
+    r"\\jgranda\NOTIFICACIONES PENALES  (ABOGADOS)\NOTIFICACIONES PENALES AÑO 2025",
+    r"\\jgranda\NOTIFICACIONES PENALES  (ABOGADOS)\NOTIFICACIONES PENALES AÑO 2026",
+]
+
+DATE_DIR_RE = re.compile(r"^\d{2}-\d{2}-\d{4}$")
+
+def _parse_dd_mm_yyyy(folder_name: str):
+    try:
+        dd, mm, yyyy = folder_name.split("-")
+        return datetime(int(yyyy), int(mm), int(dd))
+    except Exception:
+        return None
+
+# Detectar “tiene PPU en el nombre” (EN CUALQUIER PARTE del nombre)
+PPU_ANYWHERE_RE = re.compile(
+    r"(\bL\.\s?\d{1,4}-20(?:2[3-9]|[3-9]\d)(?:-[A-Z])?\b)|"
+    r"(\bLEG-\d{1,4}-(?:\d{4}(?:-[A-Z])?|[A-Z])\b)|"
+    r"(\bD-\d{1,4}-(?:19\d{2}|20(?:0\d|1\d|2[0-6]))(?:-[A-Z])?\b)",
+    re.IGNORECASE
+)
+
+def _has_ppu_in_name(filename: str) -> bool:
+    base = os.path.splitext(os.path.basename(filename))[0]
+    return bool(PPU_ANYWHERE_RE.search(base))
+
+def _iter_date_dirs_fast(root: str):
+    """
+    Asume estructura típica:
+      ROOT\ABOGADO\dd-mm-aaaa\...
+    Retorna (dt, date_dir_path, abogado_name).
+    """
+    out = []
+    try:
+        with os.scandir(root) as abogados:
+            for a in abogados:
+                if not a.is_dir():
+                    continue
+                abogado_name = a.name
+                try:
+                    with os.scandir(a.path) as fechas:
+                        for f in fechas:
+                            if not f.is_dir():
+                                continue
+                            if not DATE_DIR_RE.match(f.name):
+                                continue
+                            dt = _parse_dd_mm_yyyy(f.name)
+                            if dt:
+                                out.append((dt, f.path, abogado_name))
+                except Exception:
+                    continue
+    except Exception:
+        return out
+    return out
+
+@busqueda_rapida_bp.route("/busqueda_ruta_scan", methods=["POST"])
+@login_required
+def busqueda_ruta_scan():
+    """
+    Devuelve máximo N PDFs (por defecto 10), ordenados por fecha (carpeta dd-mm-aaaa) desc.
+    Trae solo PDFs cuyo nombre NO contiene patrón de PPU (D-..., L...., LEG-...).
+    """
+    body = request.get_json(silent=True) or {}
+    limit = int(body.get("limit", 10) or 10)
+    limit = max(1, min(limit, 50))  # tope defensivo
+
+    candidates = []  # (dt, mtime, ruta, abogado_guess)
+
+    # 1) Lista todas las carpetas dd-mm-aaaa de forma rápida
+    date_dirs = []
+    for root in RUTA_SCAN_ROOTS:
+        date_dirs.extend(_iter_date_dirs_fast(root))
+
+    # 2) Ordena por fecha desc y recorre hasta llenar LIMIT
+    date_dirs.sort(key=lambda x: x[0], reverse=True)
+
+    for (dt, date_dir_path, abogado_guess) in date_dirs:
+        # Escanea PDFs debajo de esa carpeta de fecha (puede haber subcarpetas)
+        for dirpath, _, filenames in os.walk(date_dir_path):
+            for fn in filenames:
+                if not fn.lower().endswith(".pdf"):
+                    continue
+                full = os.path.join(dirpath, fn)
+
+                # filtro: NO debe tener PPU en el nombre
+                if _has_ppu_in_name(fn):
+                    continue
+
+                try:
+                    mtime = os.path.getmtime(full)
+                except Exception:
+                    mtime = 0
+
+                candidates.append((dt, mtime, full, abogado_guess))
+
+        # early-stop: si ya tenemos bastante, podemos cortar “suave”
+        # (igual vamos a ordenar al final)
+        if len(candidates) >= limit * 5:
+            # suficiente pool para ordenar y cortar
+            break
+
+    # 3) Orden final: fecha carpeta desc, luego mtime desc
+    candidates.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    top = candidates[:limit]
+
+    rows = []
+    for i, (dt, mtime, ruta, abogado_guess) in enumerate(top):
+        base = os.path.basename(ruta)
+        rows.append({
+            "id": i,
+            "ruta_pdf": ruta,
+            "nombre_original": base,
+            "fecha_carpeta": dt.strftime("%Y-%m-%d"),  # para front
+            "abogado_guess": abogado_guess or "",
+            "mtime": mtime,
+        })
+
+    return jsonify(rows), 200
+
+
+INVALID_WIN_CHARS_RE = re.compile(r'[<>:"/\\|?*\x00-\x1F]')
+MULTI_SPACE_RE = re.compile(r"\s+")
+
+def _sanitize_filename(name: str) -> str:
+    # Normaliza unicode + limpia caracteres inválidos en Windows
+    s = unicodedata.normalize("NFKC", name or "")
+    s = INVALID_WIN_CHARS_RE.sub(" ", s)
+    s = MULTI_SPACE_RE.sub(" ", s).strip()
+    # Evita nombres vacíos
+    return s or "SIN_NOMBRE"
+
+def _keep_suffix_original(base_no_ext: str) -> str:
+    """
+    Tu regla “dejar las 6 últimas letras” la hago robusta así:
+    - Si hay >= 2 palabras: conserva las ÚLTIMAS 2 palabras (tu ejemplo: "LO HICE")
+    - Si no: conserva los últimos 6 caracteres del base
+    """
+    parts = [p for p in re.split(r"\s+", (base_no_ext or "").strip()) if p]
+    if len(parts) >= 2:
+        return " ".join(parts[-2:])
+    s = (base_no_ext or "").strip()
+    return s[-6:] if len(s) >= 6 else s
+
+def _build_new_pdf_name(abogado: str, registro_ppu: str, origen: str, original_filename: str) -> str:
+    abogado = (abogado or "").strip()
+    registro_ppu = (registro_ppu or "").strip()
+    origen = (origen or "").strip()
+
+    base_new = f"{abogado} {registro_ppu} {origen}".strip()
+    base_new = _sanitize_filename(base_new)
+
+    orig_base = os.path.splitext(os.path.basename(original_filename or ""))[0]
+    suffix = _keep_suffix_original(orig_base)
+    suffix = _sanitize_filename(suffix)
+
+    # Si suffix ya está incluido al final, no lo dupliques
+    if suffix and not base_new.upper().endswith(suffix.upper()):
+        base_new = f"{base_new} {suffix}".strip()
+
+    return base_new + ".pdf"
+
+def _unique_path_same_dir(dirpath: str, filename: str) -> str:
+    """
+    Si existe, agrega (1), (2), etc.
+    """
+    candidate = os.path.join(dirpath, filename)
+    if not os.path.exists(candidate):
+        return candidate
+
+    base, ext = os.path.splitext(filename)
+    n = 1
+    while True:
+        cand = os.path.join(dirpath, f"{base} ({n}){ext}")
+        if not os.path.exists(cand):
+            return cand
+        n += 1
+
+@busqueda_rapida_bp.route("/busqueda_ruta_sync", methods=["POST"])
+@login_required
+def busqueda_ruta_sync():
+    """
+    Payload: lista de filas, cada una trae:
+      - rutaPdf (ruta del PDF)
+      - nombreOriginal (opcional)
+      - y los mismos campos de busqueda_rapida_sync (registroPpu, abogado, origen, etc.)
+    Acción:
+      1) actualiza BD (respetando allowed_fields)
+      2) renombra PDF en su carpeta usando: "{abogado} {PPU} {origen} + sufijo_original"
+    """
+    username = session.get("username")
+    if not username:
+        return jsonify(error="No autenticado"), 401
+
+    users = _get_users_dict()
+    allowed_fields = get_allowed_fields_for_user(username, users)
+    if not allowed_fields:
+        current_app.logger.warning(f"busqueda_ruta_sync: Acceso denegado para {username}")
+        return jsonify(updated=[], renamed=[], errors=["Acceso denegado"]), 403
+
+    rows = request.get_json() or []
+    if not isinstance(rows, list):
+        return jsonify(updated=[], renamed=[], errors=["Payload inválido"]), 400
+
+    conn = get_db_connection()
+    if conn is None:
+        return jsonify(updated=[], renamed=[], errors=["DB no disponible"]), 500
+
+    cursor = conn.cursor(dictionary=True)
+    try:
+        try:
+            cursor.execute("SET time_zone = '-05:00'")
+        except Exception:
+            pass
+
+        updated_ppus = []
+        renamed = []
+        errors = []
+
+        # helpers internos de tu sync original
+        def _s(v):
+            if v is None:
+                return ""
+            try:
+                return str(v).strip()
+            except Exception:
+                return ""
+
+        def _date_norm(v):
+            if v is None:
+                return None
+            if isinstance(v, (datetime,)):
+                return v.strftime("%Y-%m-%d")
+            if isinstance(v, (date,)):
+                return v.strftime("%Y-%m-%d")
+            sv = str(v).strip()
+            if not sv:
+                return None
+            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"):
+                try:
+                    dt = datetime.strptime(sv, fmt)
+                    return dt.strftime("%Y-%m-%d")
+                except ValueError:
+                    continue
+            return None
+
+        comparadores = [
+            ("abogado",            "abogado"),
+            ("denunciado",         "denunciado"),
+            ("origen",             "origen"),
+            ("nrDeExpCompleto",    "nr_de_exp_completo"),
+            ("fiscaliaOrigen",     "fiscalia_origen"),
+            ("departamento",       "departamento"),
+            ("juzgado",            "juzgado"),
+            ("delito",             "delito"),
+            ("informeJuridico",    "informe_juridico"),
+            ("item",               "item"),
+            ("eSituacional",       "e_situacional"),
+            ("fechaIngreso",       "fecha_ingreso"),
+            ("fechaESituacional",  "fecha_e_situacional"),
+            ("etiqueta",           "etiqueta"),
+            ("razonArchivo",       "razon_archivo"),
+        ]
+        date_fields = {"fecha_ingreso", "fecha_e_situacional"}
+
+        for idx, new_row in enumerate(rows, start=1):
+            ppu = new_row.get("registroPpu") or new_row.get("registro_ppu")
+            ruta_pdf = new_row.get("rutaPdf") or new_row.get("ruta_pdf") or ""
+            nombre_original = new_row.get("nombreOriginal") or new_row.get("nombre_original") or (os.path.basename(ruta_pdf) if ruta_pdf else "")
+
+            if not ppu:
+                errors.append(f"[Fila {idx}] Falta registroPpu: se omite.")
+                continue
+
+            # 🔒 Defensa: nunca aceptar fechaDeArchivo desde front
+            new_row.pop("fechaDeArchivo", None)
+            new_row.pop("fecha_de_archivo", None)
+
+            # 1) Leer fila actual
+            cursor.execute("""
+                SELECT
+                    abogado,
+                    denunciado,
+                    origen,
+                    `nr de exp completo`  AS nr_de_exp_completo,
+                    fiscalia              AS fiscalia_origen,
+                    departamento,
+                    juzgado,
+                    delito,
+                    e_situacional,
+                    informe_juridico,
+                    item,
+                    fecha_ingreso,
+                    fecha_e_situacional,
+                    etiqueta,
+                    fecha_de_archivo,
+                    razon_archivo         AS razon_archivo
+                FROM datapenal
+                WHERE registro_ppu = %s
+            """, (ppu,))
+            db_row = cursor.fetchone()
+            if not db_row:
+                errors.append(f"[Fila {idx}] PPU no existe en BD: {ppu}")
+                continue
+
+            # 2) Comparar y armar diffs (solo permitidos)
+            diffs = {}
+
+            for front_key, db_key in comparadores:
+                if front_key not in allowed_fields:
+                    continue
+
+                if db_key in date_fields:
+                    new_val_norm = _date_norm(new_row.get(front_key))
+                    old_raw = db_row.get(db_key)
+                    if isinstance(old_raw, (datetime, date)):
+                        old_val_norm = old_raw.strftime("%Y-%m-%d")
+                    else:
+                        old_val_norm = _date_norm(old_raw)
+
+                    if new_val_norm != old_val_norm:
+                        diffs[db_key] = new_val_norm
+                else:
+                    new_val = _s(new_row.get(front_key))
+                    old_val = _s(db_row.get(db_key))
+                    if new_val != old_val:
+                        if db_key == "nr_de_exp_completo":
+                            diffs["`nr de exp completo`"] = new_val
+                        elif db_key == "fiscalia_origen":
+                            diffs["fiscalia"] = new_val
+                        else:
+                            diffs[db_key] = new_val
+
+            # 3) Update si corresponde
+            if diffs:
+                diffs.pop("fecha_de_archivo", None)
+                set_parts = [f"{col} = %s" for col in diffs.keys()]
+                params = list(diffs.values()) + [ppu]
+                sql = f"UPDATE datapenal SET {', '.join(set_parts)} WHERE registro_ppu = %s"
+                cursor.execute(sql, params)
+                updated_ppus.append(ppu)
+
+            # 4) Renombrar PDF (si hay ruta)
+            try:
+                if ruta_pdf and os.path.exists(ruta_pdf):
+                    dirpath = os.path.dirname(ruta_pdf)
+
+                    abogado = new_row.get("abogado") or db_row.get("abogado") or ""
+                    origen = new_row.get("origen") or db_row.get("origen") or ""
+
+                    new_name = _build_new_pdf_name(abogado, ppu, origen, nombre_original or ruta_pdf)
+                    new_path = _unique_path_same_dir(dirpath, new_name)
+
+                    if os.path.normpath(new_path) != os.path.normpath(ruta_pdf):
+                        os.replace(ruta_pdf, new_path)
+                        renamed.append({"ppu": ppu, "from": ruta_pdf, "to": new_path})
+                else:
+                    # no es “error duro”: puede que el archivo se movió
+                    pass
+            except Exception as ex:
+                current_app.logger.error("Error renombrando PDF", exc_info=True)
+                errors.append(f"[Fila {idx}] Error renombrando PDF (PPU {ppu}): {ex}")
+
+        conn.commit()
+        return jsonify(updated=updated_ppus, renamed=renamed, errors=errors), 200
+
+    except Exception:
+        conn.rollback()
+        current_app.logger.exception("busqueda_ruta_sync error", exc_info=True)
+        return jsonify(updated=[], renamed=[], errors=["Error interno"]), 500
+
+    finally:
+        try:
+            cursor.close()
+        except Exception:
+            pass
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+# ============================================================
+#  ABRIR PDF – MODO RUTA TEMPORAL (ENDPOINT INDEPENDIENTE)
+# ============================================================
+
+from urllib.parse import unquote
+import os
+
+ALLOWED_BASES_TMP = [
+    r"\\agarciaf\NOTIFICACIONES RENIEC\MESA DE PARTES\PENAL\NOTIFICACIONES",
+    r"\\jgranda\NOTIFICACIONES PENALES  (ABOGADOS)",
+]
+
+def _norm(p):
+    return os.path.normcase(os.path.normpath(p))
+
+@busqueda_rapida_bp.route("/open_pdf_tmp", methods=["GET"])
+@login_required
+def open_pdf_tmp():
+    ruta = request.args.get("ruta", "")
+    if not ruta:
+        return jsonify({"error": "ruta requerida"}), 400
+
+    ruta = _norm(unquote(ruta))
+
+    # ✅ VALIDACIÓN CORRECTA PARA UNC (startswith)
+    permitido = False
+    for base in ALLOWED_BASES_TMP:
+        base_n = _norm(base)
+        if ruta.startswith(base_n + os.sep) or ruta == base_n:
+            permitido = True
+            break
+
+    if not permitido:
+        return jsonify({"error": "Ruta fuera de ubicación permitida"}), 403
+
+    if not os.path.isfile(ruta):
+        return jsonify({"error": "Archivo no existe"}), 404
+
+    return send_file(ruta, mimetype="application/pdf", as_attachment=False)
